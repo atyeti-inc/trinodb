@@ -20,6 +20,7 @@ import io.airlift.json.JsonCodec;
 import io.airlift.json.JsonCodecFactory;
 import io.airlift.json.JsonMapperProvider;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
@@ -27,10 +28,12 @@ import io.trino.type.TypeDeserializer;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -127,6 +130,7 @@ public class TestMongoTableHandle
                 Optional.empty(),
                 TupleDomain.all(),
                 projectedColumns,
+                ImmutableList.of(),
                 OptionalInt.empty());
 
         String json = codec.toJson(expected);
@@ -134,5 +138,29 @@ public class TestMongoTableHandle
 
         assertThat(actual)
                 .isEqualTo(expected);
+    }
+
+    @Test
+    public void testRoundTripWithSortOrder()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("Schema", "Table");
+        MongoColumnHandle column = new MongoColumnHandle("nationkey", ImmutableList.of(), BIGINT, false, false, Optional.empty());
+        List<MongoSortItem> sortOrder = ImmutableList.of(new MongoSortItem(column, SortOrder.DESC_NULLS_LAST));
+
+        MongoTableHandle expected = new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                Optional.empty(),
+                TupleDomain.all(),
+                ImmutableSet.of(),
+                sortOrder,
+                OptionalInt.of(5));
+
+        String json = codec.toJson(expected);
+        MongoTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual).isEqualTo(expected);
+        assertThat(actual.toString()).contains("sortOrder=[nationkey:bigint DESC NULLS LAST] limit=5");
     }
 }

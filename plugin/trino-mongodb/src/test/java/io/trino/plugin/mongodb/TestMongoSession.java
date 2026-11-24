@@ -20,6 +20,7 @@ import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
@@ -32,6 +33,7 @@ import java.util.Optional;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.mongodb.MongoErrorCode.MONGODB_CLUSTER_ERROR;
+import static io.trino.plugin.mongodb.MongoSession.buildSort;
 import static io.trino.plugin.mongodb.MongoSession.projectSufficientColumns;
 import static io.trino.spi.ErrorType.EXTERNAL;
 import static io.trino.spi.predicate.Range.equal;
@@ -294,6 +296,30 @@ public class TestMongoSession
         assertThat(output)
                 .containsExactly(col9)
                 .hasSize(1);
+    }
+
+    @Test
+    public void testBuildSort()
+    {
+        // Single ascending column -> { "col": 1 }
+        assertThat(buildSort(ImmutableList.of(new MongoSortItem(COL1, SortOrder.ASC_NULLS_FIRST))))
+                .isEqualTo(new Document("col1", 1));
+
+        // Single descending column -> { "col": -1 }
+        assertThat(buildSort(ImmutableList.of(new MongoSortItem(COL1, SortOrder.DESC_NULLS_LAST))))
+                .isEqualTo(new Document("col1", -1));
+
+        // Nested dotted path -> { "a.b.c": 1 }
+        assertThat(buildSort(ImmutableList.of(new MongoSortItem(COL6, SortOrder.ASC_NULLS_FIRST))))
+                .isEqualTo(new Document("grandparent.parent.col6", 1));
+
+        // Multi-column order preservation -> { "col1": 1, "col2": -1 }
+        Document expectedMulti = new Document("col1", 1).append("col2", -1);
+        Document actualMulti = buildSort(ImmutableList.of(
+                new MongoSortItem(COL1, SortOrder.ASC_NULLS_FIRST),
+                new MongoSortItem(COL2, SortOrder.DESC_NULLS_LAST)));
+        assertThat(actualMulti).isEqualTo(expectedMulti);
+        assertThat(actualMulti.keySet()).containsExactly("col1", "col2");
     }
 
     private static MongoColumnHandle createColumnHandle(String baseName, Type type, String... dereferenceNames)
