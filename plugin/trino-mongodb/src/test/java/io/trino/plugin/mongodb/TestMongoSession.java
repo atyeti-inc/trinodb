@@ -208,6 +208,45 @@ public class TestMongoSession
     }
 
     @Test
+    public void testBuildQueryMultipleNullAllowedDisjunctions()
+    {
+        TupleDomain<ColumnHandle> tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(
+                COL2, Domain.create(ValueSet.ofRanges(equal(createUnboundedVarcharType(), utf8Slice("Female"))), true),
+                COL3, Domain.create(ValueSet.ofRanges(equal(createUnboundedVarcharType(), utf8Slice("A"))), true)));
+
+        Document query = MongoSession.buildQuery(tupleDomain);
+        Document expected = new Document("$and", ImmutableList.of(
+                new Document("$or", asList(
+                        new Document(COL2.baseName(), new Document("$eq", "Female")),
+                        new Document(COL2.baseName(), new Document("$eq", null)))),
+                new Document("$or", asList(
+                        new Document(COL3.baseName(), new Document("$eq", "A")),
+                        new Document(COL3.baseName(), new Document("$eq", null))))));
+        assertThat(query)
+                .isEqualTo(expected);
+    }
+
+    @Test
+    public void testBuildQueryMultipleDisjunctions()
+    {
+        TupleDomain<ColumnHandle> tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(
+                COL1, Domain.create(ValueSet.ofRanges(lessThan(BIGINT, 100L), greaterThan(BIGINT, 200L)), true),
+                COL2, Domain.create(ValueSet.ofRanges(equal(createUnboundedVarcharType(), utf8Slice("hello")), equal(createUnboundedVarcharType(), utf8Slice("world"))), true)));
+
+        Document query = MongoSession.buildQuery(tupleDomain);
+        Document expected = new Document("$and", ImmutableList.of(
+                new Document("$or", asList(
+                        new Document(COL1.baseName(), new Document("$lt", 100L)),
+                        new Document(COL1.baseName(), new Document("$gt", 200L)),
+                        new Document(COL1.baseName(), new Document("$eq", null)))),
+                new Document("$or", asList(
+                        new Document(COL2.baseName(), new Document("$in", ImmutableList.of("hello", "world"))),
+                        new Document(COL2.baseName(), new Document("$eq", null))))));
+        assertThat(query)
+                .isEqualTo(expected);
+    }
+
+    @Test
     public void testBooleanPredicatePushdown()
     {
         TupleDomain<ColumnHandle> tupleDomain = TupleDomain.withColumnDomains(ImmutableMap.of(COL4, Domain.singleValue(BOOLEAN, true)));
