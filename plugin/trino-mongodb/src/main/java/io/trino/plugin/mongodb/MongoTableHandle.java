@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.mongodb;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
@@ -27,19 +29,32 @@ import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
 public record MongoTableHandle(
-        SchemaTableName schemaTableName,
-        RemoteTableName remoteTableName,
-        Optional<String> filter,
-        TupleDomain<ColumnHandle> constraint,
-        Set<MongoColumnHandle> projectedColumns,
-        OptionalInt limit)
+        @JsonProperty("schemaTableName") SchemaTableName schemaTableName,
+        @JsonProperty("remoteTableName") RemoteTableName remoteTableName,
+        @JsonProperty("filter") Optional<String> filter,
+        @JsonProperty("constraint") TupleDomain<ColumnHandle> constraint,
+        @JsonProperty("projectedColumns") Set<MongoColumnHandle> projectedColumns,
+        @JsonProperty("limit") OptionalInt limit,
+        @JsonProperty("aggregation") Optional<MongoAggregation> aggregation)
         implements ConnectorTableHandle
 {
     public MongoTableHandle(SchemaTableName schemaTableName, RemoteTableName remoteTableName, Optional<String> filter)
     {
-        this(schemaTableName, remoteTableName, filter, TupleDomain.all(), ImmutableSet.of(), OptionalInt.empty());
+        this(schemaTableName, remoteTableName, filter, TupleDomain.all(), ImmutableSet.of(), OptionalInt.empty(), Optional.empty());
     }
 
+    public MongoTableHandle(
+            SchemaTableName schemaTableName,
+            RemoteTableName remoteTableName,
+            Optional<String> filter,
+            TupleDomain<ColumnHandle> constraint,
+            Set<MongoColumnHandle> projectedColumns,
+            OptionalInt limit)
+    {
+        this(schemaTableName, remoteTableName, filter, constraint, projectedColumns, limit, Optional.empty());
+    }
+
+    @JsonCreator
     public MongoTableHandle
     {
         requireNonNull(schemaTableName, "schemaTableName is null");
@@ -48,6 +63,7 @@ public record MongoTableHandle(
         requireNonNull(constraint, "constraint is null");
         projectedColumns = ImmutableSet.copyOf(requireNonNull(projectedColumns, "projectedColumns is null"));
         requireNonNull(limit, "limit is null");
+        aggregation = aggregation == null ? Optional.empty() : aggregation;
     }
 
     @Override
@@ -69,6 +85,7 @@ public record MongoTableHandle(
             builder.append(" columns=").append(projectedColumns);
         }
         limit.ifPresent(value -> builder.append(" limit=").append(value));
+        aggregation.ifPresent(value -> builder.append(" aggregation=[").append(value).append("]"));
         return builder.toString();
     }
 
@@ -80,7 +97,8 @@ public record MongoTableHandle(
                 filter,
                 constraint,
                 projectedColumns,
-                limit);
+                limit,
+                aggregation);
     }
 
     public MongoTableHandle withConstraint(TupleDomain<ColumnHandle> constraint)
@@ -91,6 +109,31 @@ public record MongoTableHandle(
                 filter,
                 constraint,
                 projectedColumns,
-                limit);
+                limit,
+                aggregation);
+    }
+
+    public MongoTableHandle withAggregation(MongoAggregation aggregation)
+    {
+        return new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                filter,
+                constraint,
+                projectedColumns,
+                limit,
+                Optional.of(aggregation));
+    }
+
+    public MongoTableHandle withAggregation(Optional<MongoAggregation> aggregation)
+    {
+        return new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                filter,
+                constraint,
+                projectedColumns,
+                limit,
+                aggregation);
     }
 }
