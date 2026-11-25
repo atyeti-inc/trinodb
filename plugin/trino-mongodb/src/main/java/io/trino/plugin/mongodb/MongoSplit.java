@@ -20,10 +20,12 @@ import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
@@ -33,11 +35,20 @@ public class MongoSplit
     private static final int INSTANCE_SIZE = instanceSize(MongoSplit.class);
 
     private final List<HostAddress> addresses;
+    private final Optional<MongoPartitionRange> partitionRange;
+
+    public MongoSplit(List<HostAddress> addresses)
+    {
+        this(addresses, Optional.empty());
+    }
 
     @JsonCreator
-    public MongoSplit(@JsonProperty("addresses") List<HostAddress> addresses)
+    public MongoSplit(
+            @JsonProperty("addresses") List<HostAddress> addresses,
+            @JsonProperty("partitionRange") Optional<MongoPartitionRange> partitionRange)
     {
         this.addresses = ImmutableList.copyOf(requireNonNull(addresses, "addresses is null"));
+        this.partitionRange = requireNonNull(partitionRange, "partitionRange is null");
     }
 
     @Override
@@ -47,11 +58,18 @@ public class MongoSplit
         return addresses;
     }
 
+    @JsonProperty
+    public Optional<MongoPartitionRange> getPartitionRange()
+    {
+        return partitionRange;
+    }
+
     @Override
     public String toString()
     {
         return toStringHelper(this)
                 .add("addresses", addresses.stream().map(HostAddress::toString).collect(joining(",")))
+                .add("partitionRange", partitionRange.orElse(null))
                 .toString();
     }
 
@@ -59,6 +77,7 @@ public class MongoSplit
     public long getRetainedSizeInBytes()
     {
         return INSTANCE_SIZE
-                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes)
+                + sizeOf(partitionRange, MongoPartitionRange::getRetainedSizeInBytes);
     }
 }
