@@ -14,7 +14,10 @@
 package io.trino.plugin.mongodb;
 
 import com.google.common.collect.ImmutableMap;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import io.airlift.units.MinDataSize;
+import jakarta.validation.constraints.Min;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -22,6 +25,8 @@ import java.util.Map;
 import static io.airlift.configuration.testing.ConfigAssertions.assertFullMapping;
 import static io.airlift.configuration.testing.ConfigAssertions.assertRecordedDefaults;
 import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
+import static io.airlift.testing.ValidationAssertions.assertFailsValidation;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -50,7 +55,11 @@ public class TestMongoClientConfig
                 .setProjectionPushdownEnabled(true)
                 .setAllowLocalScheduling(false)
                 .setInsertOrdered(false)
-                .setDynamicFilteringWaitTimeout(new Duration(5, SECONDS)));
+                .setDynamicFilteringWaitTimeout(new Duration(5, SECONDS))
+                .setParallelSplitEnabled(true)
+                .setSplitSize(DataSize.of(64, MEGABYTE))
+                .setMinRecordsPerSplit(0L)
+                .setSplitStrategy(MongoSplitStrategy.AUTOMATIC));
     }
 
     @Test
@@ -78,6 +87,10 @@ public class TestMongoClientConfig
                 .put("mongodb.allow-local-scheduling", "true")
                 .put("mongodb.insert-ordered", "true")
                 .put("mongodb.dynamic-filtering.wait-timeout", "2ms")
+                .put("mongodb.parallel-split-enabled", "false")
+                .put("mongodb.split-size", "128MB")
+                .put("mongodb.min-records-per-split", "50000")
+                .put("mongodb.split-strategy", "CHUNK")
                 .buildOrThrow();
 
         MongoClientConfig expected = new MongoClientConfig()
@@ -99,8 +112,30 @@ public class TestMongoClientConfig
                 .setProjectionPushdownEnabled(false)
                 .setAllowLocalScheduling(true)
                 .setInsertOrdered(true)
-                .setDynamicFilteringWaitTimeout(new Duration(2, MILLISECONDS));
+                .setDynamicFilteringWaitTimeout(new Duration(2, MILLISECONDS))
+                .setParallelSplitEnabled(false)
+                .setSplitSize(DataSize.of(128, MEGABYTE))
+                .setMinRecordsPerSplit(50000L)
+                .setSplitStrategy(MongoSplitStrategy.CHUNK);
 
         assertFullMapping(properties, expected);
+    }
+
+    @Test
+    public void testValidation()
+    {
+        assertFailsValidation(
+                new MongoClientConfig()
+                        .setSplitSize(DataSize.ofBytes(0)),
+                "splitSize",
+                "must be greater than or equal to 1B",
+                MinDataSize.class);
+
+        assertFailsValidation(
+                new MongoClientConfig()
+                        .setMinRecordsPerSplit(-1),
+                "minRecordsPerSplit",
+                "must be greater than or equal to 0",
+                Min.class);
     }
 }
