@@ -69,7 +69,7 @@ jobs:
   zizmor:
     permissions:
       contents: read
-    runs-on: [self-hosted, gcp-ephemeral]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
