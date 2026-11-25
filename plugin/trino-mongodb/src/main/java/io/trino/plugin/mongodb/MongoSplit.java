@@ -20,10 +20,13 @@ import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ConnectorSplit;
 
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
+import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
 
@@ -33,11 +36,20 @@ public class MongoSplit
     private static final int INSTANCE_SIZE = instanceSize(MongoSplit.class);
 
     private final List<HostAddress> addresses;
+    private final Optional<MongoPartitionBounds> partitionBounds;
+
+    public MongoSplit(List<HostAddress> addresses)
+    {
+        this(addresses, Optional.empty());
+    }
 
     @JsonCreator
-    public MongoSplit(@JsonProperty("addresses") List<HostAddress> addresses)
+    public MongoSplit(
+            @JsonProperty("addresses") List<HostAddress> addresses,
+            @JsonProperty("partitionBounds") Optional<MongoPartitionBounds> partitionBounds)
     {
         this.addresses = ImmutableList.copyOf(requireNonNull(addresses, "addresses is null"));
+        this.partitionBounds = partitionBounds == null ? Optional.empty() : partitionBounds;
     }
 
     @Override
@@ -47,11 +59,39 @@ public class MongoSplit
         return addresses;
     }
 
+    @JsonProperty
+    public Optional<MongoPartitionBounds> getPartitionBounds()
+    {
+        return partitionBounds;
+    }
+
+    @Override
+    public boolean equals(Object obj)
+    {
+        if (this == obj) {
+            return true;
+        }
+        if (obj == null || getClass() != obj.getClass()) {
+            return false;
+        }
+        MongoSplit other = (MongoSplit) obj;
+        return Objects.equals(this.addresses, other.addresses) &&
+                Objects.equals(this.partitionBounds, other.partitionBounds);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return Objects.hash(addresses, partitionBounds);
+    }
+
     @Override
     public String toString()
     {
         return toStringHelper(this)
+                .omitNullValues()
                 .add("addresses", addresses.stream().map(HostAddress::toString).collect(joining(",")))
+                .add("partitionBounds", partitionBounds.orElse(null))
                 .toString();
     }
 
@@ -59,6 +99,7 @@ public class MongoSplit
     public long getRetainedSizeInBytes()
     {
         return INSTANCE_SIZE
-                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes);
+                + estimatedSizeOf(addresses, HostAddress::getRetainedSizeInBytes)
+                + sizeOf(partitionBounds, MongoPartitionBounds::getRetainedSizeInBytes);
     }
 }
