@@ -4,16 +4,16 @@
 - **Functional Role**: Distributed SQL query engine with SPI/plugin architecture (Modular Monolith).
 - **Target Mode**: Fork contributing to upstream
 - **Primary Remotes**:
-  - `origin`: https://github.com/atyeti-inc/trino.git
+  - `origin`: https://github.com/atyeti-inc/trinodb.git
   - `upstream`: https://github.com/trinodb/trino.git
 - **Issue Tracking & Scope Boundaries**:
   - Yeti may NEVER post, edit, remove or in any way interact with the upstream repository unless expressly told to by the user. it is default READ-ONLY.
-  - All planned tasks, epics, and work orders map to `atyeti-inc/trino`.
-  - Upstream Lifecycle: Yeti implements the issue on `feature/<issue-name>`, candidate PR is reviewed by User on `origin`, then submitted upstream to `trinodb/trino` ONLY with express request by the user. Internal release uses `git cherry-pick` into `atyeti-release-###` (published as `atyeti-inc/trino:###-atyeti.1`), rebased cleanly onto release version `###` once merged upstream.
+  - All planned tasks, epics, and work orders map to `atyeti-inc/trinodb`.
+  - Upstream Lifecycle: Yeti implements the issue on `feature/<issue-name>`, candidate PR is reviewed by User on `origin`, then submitted upstream to `trinodb/trino` ONLY with express request by the user. Internal release uses `git cherry-pick` into `atyeti-release-###` (published as `atyeti-inc/trinodb:###-atyeti.1`), rebased cleanly onto release version `###` once merged upstream.
   - Committer Identity Invariant: All git commits must strictly use author and committer:
     `Christopher Caldwell <Christopher.Caldwell@Atyeti.com>`
   - Contributor License Agreement (CLA) Prerequisite: Submitting any candidate PR upstream to `trinodb/trino` strictly requires that Christopher Caldwell has an executed Trino Contributor License Agreement verified on file with `cla@trino.io`. PRs must never be submitted upstream without confirmed CLA registration.
-  - Refusals & Out-of-Scope: Strict plan-vs-diff containment. Any out-of-scope defects, enhancements, or architectural recommendations discovered during execution MUST be noted onto the origin issue (`atyeti-inc/trino`) as a follow-up issue, never logged upstream or included in the active PR.
+  - Refusals & Out-of-Scope: Strict plan-vs-diff containment. Any out-of-scope defects, enhancements, or architectural recommendations discovered during execution MUST be noted onto the origin issue (`atyeti-inc/trinodb`) as a follow-up issue, never logged upstream or included in the active PR.
 
 ## 2. Core Architectural Invariants & ADRs
 - **Architecture Pattern**: Modular Monolith (Distributed SQL Query Engine with SPI/Plugin Architecture)
