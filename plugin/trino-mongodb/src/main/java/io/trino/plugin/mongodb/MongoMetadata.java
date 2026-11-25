@@ -625,7 +625,8 @@ public class MongoMetadata
                         handle.filter(),
                         handle.constraint(),
                         handle.projectedColumns(),
-                        OptionalInt.of(toIntExact(limit))),
+                        OptionalInt.of(toIntExact(limit)),
+                        handle.aggregation()),
                 true,
                 false));
     }
@@ -672,7 +673,8 @@ public class MongoMetadata
                 handle.filter(),
                 newDomain,
                 handle.projectedColumns(),
-                handle.limit());
+                handle.limit(),
+                handle.aggregation());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, remainingFilter, constraint.getExpression(), false));
     }

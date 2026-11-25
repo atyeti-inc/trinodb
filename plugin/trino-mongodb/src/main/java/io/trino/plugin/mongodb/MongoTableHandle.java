@@ -24,6 +24,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 
 import static java.util.Objects.requireNonNull;
+import static java.util.Objects.requireNonNullElse;
 import static java.util.stream.Collectors.joining;
 
 public record MongoTableHandle(
@@ -32,12 +33,24 @@ public record MongoTableHandle(
         Optional<String> filter,
         TupleDomain<ColumnHandle> constraint,
         Set<MongoColumnHandle> projectedColumns,
-        OptionalInt limit)
+        OptionalInt limit,
+        Optional<MongoAggregation> aggregation)
         implements ConnectorTableHandle
 {
     public MongoTableHandle(SchemaTableName schemaTableName, RemoteTableName remoteTableName, Optional<String> filter)
     {
-        this(schemaTableName, remoteTableName, filter, TupleDomain.all(), ImmutableSet.of(), OptionalInt.empty());
+        this(schemaTableName, remoteTableName, filter, TupleDomain.all(), ImmutableSet.of(), OptionalInt.empty(), Optional.empty());
+    }
+
+    public MongoTableHandle(
+            SchemaTableName schemaTableName,
+            RemoteTableName remoteTableName,
+            Optional<String> filter,
+            TupleDomain<ColumnHandle> constraint,
+            Set<MongoColumnHandle> projectedColumns,
+            OptionalInt limit)
+    {
+        this(schemaTableName, remoteTableName, filter, constraint, projectedColumns, limit, Optional.empty());
     }
 
     public MongoTableHandle
@@ -48,6 +61,7 @@ public record MongoTableHandle(
         requireNonNull(constraint, "constraint is null");
         projectedColumns = ImmutableSet.copyOf(requireNonNull(projectedColumns, "projectedColumns is null"));
         requireNonNull(limit, "limit is null");
+        aggregation = requireNonNullElse(aggregation, Optional.empty());
     }
 
     @Override
@@ -69,6 +83,7 @@ public record MongoTableHandle(
             builder.append(" columns=").append(projectedColumns);
         }
         limit.ifPresent(value -> builder.append(" limit=").append(value));
+        aggregation.ifPresent(value -> builder.append(" aggregation=[").append(value).append("]"));
         return builder.toString();
     }
 
@@ -80,7 +95,8 @@ public record MongoTableHandle(
                 filter,
                 constraint,
                 projectedColumns,
-                limit);
+                limit,
+                aggregation);
     }
 
     public MongoTableHandle withConstraint(TupleDomain<ColumnHandle> constraint)
@@ -91,6 +107,19 @@ public record MongoTableHandle(
                 filter,
                 constraint,
                 projectedColumns,
-                limit);
+                limit,
+                aggregation);
+    }
+
+    public MongoTableHandle withAggregation(MongoAggregation aggregation)
+    {
+        return new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                filter,
+                constraint,
+                projectedColumns,
+                limit,
+                Optional.of(aggregation));
     }
 }
