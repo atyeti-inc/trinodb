@@ -30,6 +30,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import static io.trino.plugin.mongodb.MongoSessionProperties.getDynamicFilteringWaitTimeout;
+import static io.trino.plugin.mongodb.MongoSessionProperties.isParallelSplitEnabled;
 import static java.util.Objects.requireNonNull;
 
 public class MongoSplitManager
@@ -52,6 +53,26 @@ public class MongoSplitManager
             Constraint constraint)
     {
         long dynamicFilteringWaitTimeoutMillis = getDynamicFilteringWaitTimeout(session).toMillis();
+        if (!isParallelSplitEnabled(session)) {
+            return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
+        }
+
+        return getParallelSplits(transaction, session, table, dynamicFilterColumns, constraint, dynamicFilteringWaitTimeoutMillis);
+    }
+
+    protected ConnectorSplitSource getParallelSplits(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            Set<ColumnHandle> dynamicFilterColumns,
+            Constraint constraint,
+            long dynamicFilteringWaitTimeoutMillis)
+    {
+        return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
+    }
+
+    private MongoSplitSource createSingleSplitSource(long dynamicFilteringWaitTimeoutMillis)
+    {
         MongoSplit split = new MongoSplit(serverDetailsProvider.getServerAddress());
         return new MongoSplitSource(dynamicFilteringWaitTimeoutMillis, new FixedSplitSource(split));
     }
