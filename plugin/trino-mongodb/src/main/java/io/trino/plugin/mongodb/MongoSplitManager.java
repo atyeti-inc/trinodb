@@ -52,8 +52,12 @@ public class MongoSplitManager
             Constraint constraint)
     {
         long dynamicFilteringWaitTimeoutMillis = getDynamicFilteringWaitTimeout(session).toMillis();
-        MongoSplit split = new MongoSplit(serverDetailsProvider.getServerAddress());
-        return new MongoSplitSource(dynamicFilteringWaitTimeoutMillis, new FixedSplitSource(split));
+        return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
+    }
+
+    private MongoSplitSource createSingleSplitSource(long dynamicFilteringWaitTimeoutMillis)
+    {
+        return new MongoSplitSource(dynamicFilteringWaitTimeoutMillis, new FixedSplitSource(new MongoSplit(serverDetailsProvider.getServerAddress())));
     }
 
     private static class MongoSplitSource
@@ -62,7 +66,7 @@ public class MongoSplitManager
         private final long dynamicFilteringWaitTimeoutMillis;
         private final ConnectorSplitSource delegateSplitSource;
 
-        public MongoSplitSource(long dynamicFilteringWaitTimeoutMillis, ConnectorSplitSource delegateSplitSource)
+        MongoSplitSource(long dynamicFilteringWaitTimeoutMillis, ConnectorSplitSource delegateSplitSource)
         {
             this.dynamicFilteringWaitTimeoutMillis = dynamicFilteringWaitTimeoutMillis;
             this.delegateSplitSource = requireNonNull(delegateSplitSource, "delegateSplitSource is null");

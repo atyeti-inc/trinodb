@@ -19,7 +19,10 @@ import io.airlift.configuration.ConfigHidden;
 import io.airlift.configuration.ConfigSecuritySensitive;
 import io.airlift.configuration.DefunctConfig;
 import io.airlift.configuration.LegacyConfig;
+import io.airlift.units.DataSize;
+import io.airlift.units.DataSize.Unit;
 import io.airlift.units.Duration;
+import io.airlift.units.MinDataSize;
 import io.airlift.units.MinDuration;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
@@ -53,6 +56,11 @@ public class MongoClientConfig
     private boolean allowLocalScheduling;
     private boolean insertOrdered;
     private Duration dynamicFilteringWaitTimeout = new Duration(5, SECONDS);
+
+    private boolean parallelSplitEnabled = true;
+    private DataSize splitSize = DataSize.of(64, Unit.MEGABYTE);
+    private long minRecordsPerSplit;
+    private MongoSplitStrategy splitStrategy = MongoSplitStrategy.AUTOMATIC;
 
     @NotNull
     public String getSchemaCollection()
@@ -301,6 +309,62 @@ public class MongoClientConfig
     public MongoClientConfig setDynamicFilteringWaitTimeout(Duration dynamicFilteringWaitTimeout)
     {
         this.dynamicFilteringWaitTimeout = dynamicFilteringWaitTimeout;
+        return this;
+    }
+
+    public boolean isParallelSplitEnabled()
+    {
+        return parallelSplitEnabled;
+    }
+
+    @Config("mongodb.parallel-split-enabled")
+    @ConfigDescription("Enable parallel split generation for collection scans")
+    public MongoClientConfig setParallelSplitEnabled(boolean parallelSplitEnabled)
+    {
+        this.parallelSplitEnabled = parallelSplitEnabled;
+        return this;
+    }
+
+    @NotNull
+    @MinDataSize("1B")
+    public DataSize getSplitSize()
+    {
+        return splitSize;
+    }
+
+    @Config("mongodb.split-size")
+    @ConfigDescription("Target data volume per split for parallel collection scans")
+    public MongoClientConfig setSplitSize(DataSize splitSize)
+    {
+        this.splitSize = splitSize;
+        return this;
+    }
+
+    @Min(0)
+    public long getMinRecordsPerSplit()
+    {
+        return minRecordsPerSplit;
+    }
+
+    @Config("mongodb.min-records-per-split")
+    @ConfigDescription("Minimum record threshold required before generating additional splits")
+    public MongoClientConfig setMinRecordsPerSplit(long minRecordsPerSplit)
+    {
+        this.minRecordsPerSplit = minRecordsPerSplit;
+        return this;
+    }
+
+    @NotNull
+    public MongoSplitStrategy getSplitStrategy()
+    {
+        return splitStrategy;
+    }
+
+    @Config("mongodb.split-strategy")
+    @ConfigDescription("Partitioning strategy for parallel split generation (AUTOMATIC, CHUNK, RANGE)")
+    public MongoClientConfig setSplitStrategy(MongoSplitStrategy splitStrategy)
+    {
+        this.splitStrategy = splitStrategy;
         return this;
     }
 }
