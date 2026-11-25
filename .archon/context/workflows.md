@@ -1,7 +1,7 @@
 # Workflow Execution Context
 
 ## 1. Delivery & Git Invariants
-- **Remote Invariant**: All working mutations (`git checkout`, `git commit`, `git push`, candidate PR creation) target `origin` (`atyeti-inc/trino`) ONLY. Upstream (`trinodb/trino`) is read-only during development.
+- **Remote Invariant**: All working mutations (`git checkout`, `git commit`, `git push`, candidate PR creation) target `origin` (`atyeti-inc/trinodb`) ONLY. Upstream (`trinodb/trino`) is read-only during development.
 - **Author Identity Invariant**: All git commits must strictly use:
   `Christopher Caldwell <Christopher.Caldwell@Atyeti.com>`
 - **Contributor License Agreement (CLA) Invariant**: All contributions are licensed under Apache-2.0. Submitting any PR upstream to `trinodb/trino` strictly requires that Christopher Caldwell has an executed Trino Contributor License Agreement on file with `cla@trino.io`. No upstream submission may occur without verified CLA registration.
