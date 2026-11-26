@@ -55,6 +55,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -113,9 +114,19 @@ public class MongoPageSource
             List<MongoColumnHandle> columns,
             String implicitPrefix)
     {
+        this(mongoSession, tableHandle, columns, implicitPrefix, Optional.empty());
+    }
+
+    public MongoPageSource(
+            MongoSession mongoSession,
+            MongoTableHandle tableHandle,
+            List<MongoColumnHandle> columns,
+            String implicitPrefix,
+            Optional<MongoPartitionBounds> partitionBounds)
+    {
         this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
         this.columnTypes = columns.stream().map(MongoColumnHandle::type).collect(toList());
-        this.cursor = mongoSession.execute(tableHandle, columns);
+        this.cursor = mongoSession.execute(tableHandle, columns, partitionBounds);
         currentDoc = null;
 
         pageBuilder = new PageBuilder(columnTypes);

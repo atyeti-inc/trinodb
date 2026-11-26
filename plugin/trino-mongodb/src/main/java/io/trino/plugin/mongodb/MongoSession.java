@@ -529,13 +529,23 @@ public class MongoSession
 
     public MongoCursor<Document> execute(MongoTableHandle tableHandle, List<MongoColumnHandle> columns)
     {
+        return execute(tableHandle, columns, Optional.empty());
+    }
+
+    public MongoCursor<Document> execute(
+            MongoTableHandle tableHandle,
+            List<MongoColumnHandle> columns,
+            Optional<MongoPartitionBounds> partitionBounds)
+    {
         Set<MongoColumnHandle> projectedColumns = tableHandle.projectedColumns();
         checkArgument(projectedColumns.isEmpty() || projectedColumns.containsAll(columns), "projectedColumns must be empty or equal to columns");
 
         Document projection = buildProjection(columns, implicitPrefix);
 
         MongoCollection<Document> collection = getCollection(tableHandle.remoteTableName());
-        Document filter = buildFilter(tableHandle);
+        Optional<Document> splitFilter = requireNonNull(partitionBounds, "partitionBounds is null")
+                .flatMap(MongoSplitQueryBuilder::buildSplitFilter);
+        Document filter = buildFilter(tableHandle, splitFilter);
         FindIterable<Document> iterable = collection.find(filter).projection(projection).collation(SIMPLE_COLLATION);
         tableHandle.limit().ifPresent(iterable::limit);
         log.debug("Find documents: collection: %s, filter: %s, projection: %s", tableHandle.schemaTableName(), filter, projection);
@@ -602,13 +612,28 @@ public class MongoSession
         return false;
     }
 
+    @VisibleForTesting
     static Document buildFilter(MongoTableHandle table)
     {
-        // Use $and operator because Document.putAll method overwrites existing entries where the key already exists
+        return buildFilter(table, Optional.empty());
+    }
+
+    @VisibleForTesting
+    static Document buildFilter(MongoTableHandle table, Optional<Document> splitFilter)
+    {
         ImmutableList.Builder<Document> filter = ImmutableList.builder();
         table.filter().ifPresent(json -> filter.add(parseFilter(json)));
-        filter.add(buildQuery(table.constraint()));
-        return andPredicate(filter.build());
+        Document query = buildQuery(table.constraint());
+        if (!query.isEmpty()) {
+            filter.add(query);
+        }
+        splitFilter.ifPresent(filter::add);
+
+        List<Document> filters = filter.build();
+        if (filters.isEmpty()) {
+            return EMPTY_DOCUMENT;
+        }
+        return andPredicate(filters);
     }
 
     @VisibleForTesting
