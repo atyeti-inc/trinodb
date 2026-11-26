@@ -36,9 +36,11 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.MongoIterable;
+import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexOptions;
+import com.mongodb.client.model.Projections;
 import com.mongodb.client.model.Updates;
 import com.mongodb.client.result.DeleteResult;
 import io.airlift.log.Logger;
@@ -64,7 +66,10 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
+import org.bson.BsonDocument;
+import org.bson.BsonValue;
 import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.bson.types.Binary;
 import org.bson.types.Decimal128;
 import org.bson.types.ObjectId;
@@ -516,6 +521,53 @@ public class MongoSession
         }
         MongoCollection<Document> collection = getClient().getDatabase(schemaName).getCollection(tableName);
         return MongoIndex.parse(collection.listIndexes());
+    }
+
+    public boolean isView(RemoteTableName remoteTableName)
+    {
+        return isView(remoteTableName.databaseName(), remoteTableName.collectionName());
+    }
+
+    public long getEstimatedDocumentCount(RemoteTableName remoteTableName)
+    {
+        return getCollection(remoteTableName).estimatedDocumentCount();
+    }
+
+    public long getCollectionSize(RemoteTableName remoteTableName)
+    {
+        try {
+            Document result = getClient().getDatabase(remoteTableName.databaseName())
+                    .runCommand(new Document("collStats", remoteTableName.collectionName()));
+            Number size = result.get("size", Number.class);
+            return size != null ? size.longValue() : 0L;
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to get collection size for %s", remoteTableName);
+            return 0L;
+        }
+    }
+
+    public List<BsonValue> sampleCandidateKeys(MongoTableHandle tableHandle, String candidateKey, int sampleSize)
+    {
+        ImmutableList.Builder<Bson> pipeline = ImmutableList.builder();
+        Document filter = buildFilter(tableHandle);
+        if (!filter.isEmpty()) {
+            pipeline.add(Aggregates.match(filter));
+        }
+        pipeline.add(Aggregates.sample(sampleSize));
+        pipeline.add(Aggregates.project(Projections.include(candidateKey)));
+
+        MongoCollection<BsonDocument> collection = getCollection(tableHandle.remoteTableName())
+                .withDocumentClass(BsonDocument.class);
+
+        ImmutableList.Builder<BsonValue> samples = ImmutableList.builder();
+        for (BsonDocument doc : collection.aggregate(pipeline.build()).collation(SIMPLE_COLLATION).allowDiskUse(false)) {
+            BsonValue value = doc.get(candidateKey);
+            if (value != null) {
+                samples.add(value);
+            }
+        }
+        return samples.build();
     }
 
     public long deleteDocuments(RemoteTableName remoteTableName, TupleDomain<ColumnHandle> constraint)
