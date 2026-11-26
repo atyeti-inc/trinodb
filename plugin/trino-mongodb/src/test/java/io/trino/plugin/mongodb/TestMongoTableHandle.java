@@ -31,6 +31,8 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
@@ -134,5 +136,128 @@ public class TestMongoTableHandle
 
         assertThat(actual)
                 .isEqualTo(expected);
+    }
+
+    @Test
+    public void testRoundTripWithAggregation()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoColumnHandle deptCol = new MongoColumnHandle("dept_id", ImmutableList.of(), VARCHAR, false, false, Optional.empty());
+        MongoColumnHandle salaryCol = new MongoColumnHandle("salary", ImmutableList.of(), DOUBLE, false, false, Optional.empty());
+        MongoColumnHandle totalCol = new MongoColumnHandle("total", ImmutableList.of(), DOUBLE, false, false, Optional.empty());
+        MongoColumnHandle countCol = new MongoColumnHandle("cnt", ImmutableList.of(), BIGINT, false, false, Optional.empty());
+
+        MongoAccumulator sumSalary = new MongoAccumulator("sum", ImmutableList.of(salaryCol), totalCol);
+        MongoAccumulator countAll = new MongoAccumulator("count", ImmutableList.of(), countCol);
+        MongoAggregation aggregation = new MongoAggregation(ImmutableList.of(deptCol), ImmutableList.of(sumSalary, countAll));
+
+        MongoTableHandle expected = new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                Optional.empty(),
+                TupleDomain.all(),
+                ImmutableSet.of(deptCol, totalCol, countCol),
+                OptionalInt.of(10),
+                Optional.of(aggregation));
+
+        String json = codec.toJson(expected);
+        MongoTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual).isEqualTo(expected);
+        assertThat(actual.hashCode()).isEqualTo(expected.hashCode());
+        assertThat(actual.aggregation()).isEqualTo(Optional.of(aggregation));
+    }
+
+    @Test
+    public void testBackwardCompatibleDeserialization()
+    {
+        // Legacy JSON without aggregation field
+        String legacyJson =
+                """
+                {
+                    "schemaTableName": {"schema": "schema", "table": "table"},
+                    "remoteTableName": {"databaseName": "schema", "collectionName": "table"},
+                    "filter": null,
+                    "constraint": {},
+                    "projectedColumns": [],
+                    "limit": null
+                }
+                """;
+        MongoTableHandle actual = codec.fromJson(legacyJson);
+        assertThat(actual.aggregation()).isEmpty();
+
+        // JSON with explicit null aggregation
+        String jsonWithNullAggregation =
+                """
+                {
+                    "schemaTableName": {"schema": "schema", "table": "table"},
+                    "remoteTableName": {"databaseName": "schema", "collectionName": "table"},
+                    "filter": null,
+                    "constraint": {},
+                    "projectedColumns": [],
+                    "limit": null,
+                    "aggregation": null
+                }
+                """;
+        MongoTableHandle actualWithNull = codec.fromJson(jsonWithNullAggregation);
+        assertThat(actualWithNull.aggregation()).isEmpty();
+    }
+
+    @Test
+    public void testToStringWithAggregation()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoColumnHandle deptCol = new MongoColumnHandle("dept_id", ImmutableList.of(), VARCHAR, false, false, Optional.empty());
+        MongoColumnHandle salaryCol = new MongoColumnHandle("salary", ImmutableList.of(), DOUBLE, false, false, Optional.empty());
+        MongoColumnHandle totalCol = new MongoColumnHandle("total", ImmutableList.of(), DOUBLE, false, false, Optional.empty());
+        MongoColumnHandle countCol = new MongoColumnHandle("cnt", ImmutableList.of(), BIGINT, false, false, Optional.empty());
+
+        MongoAccumulator sumSalary = new MongoAccumulator("sum", ImmutableList.of(salaryCol), totalCol);
+        MongoAccumulator countAll = new MongoAccumulator("count", ImmutableList.of(), countCol);
+        MongoAggregation aggregation = new MongoAggregation(ImmutableList.of(deptCol), ImmutableList.of(sumSalary, countAll));
+
+        MongoTableHandle handle = new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                Optional.empty(),
+                TupleDomain.all(),
+                ImmutableSet.of(),
+                OptionalInt.empty(),
+                Optional.of(aggregation));
+
+        assertThat(handle.toString()).contains("aggregation=[groupBy=[dept_id], aggregations=[total := sum(salary), cnt := count(*)]]");
+
+        MongoAggregation globalAgg = new MongoAggregation(ImmutableList.of(), ImmutableList.of(countAll));
+        MongoTableHandle globalHandle = handle.withAggregation(globalAgg);
+        assertThat(globalHandle.toString()).contains("aggregation=[global, aggregations=[cnt := count(*)]]");
+    }
+
+    @Test
+    public void testWitherMethodsPreserveAggregation()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoColumnHandle countCol = new MongoColumnHandle("cnt", ImmutableList.of(), BIGINT, false, false, Optional.empty());
+        MongoAccumulator countAll = new MongoAccumulator("count", ImmutableList.of(), countCol);
+        MongoAggregation aggregation = new MongoAggregation(ImmutableList.of(), ImmutableList.of(countAll));
+
+        MongoTableHandle handle = new MongoTableHandle(schemaTableName, remoteTableName, Optional.empty())
+                .withAggregation(aggregation);
+
+        assertThat(handle.aggregation()).isEqualTo(Optional.of(aggregation));
+
+        MongoTableHandle withLimit = handle.withLimit(OptionalInt.of(100));
+        assertThat(withLimit.aggregation()).isEqualTo(Optional.of(aggregation));
+        assertThat(withLimit.limit()).isEqualTo(OptionalInt.of(100));
+
+        MongoTableHandle withConstraint = handle.withConstraint(TupleDomain.none());
+        assertThat(withConstraint.aggregation()).isEqualTo(Optional.of(aggregation));
+        assertThat(withConstraint.constraint().isNone()).isTrue();
+
+        MongoTableHandle withProjectedColumns = handle.withProjectedColumns(ImmutableSet.of(countCol));
+        assertThat(withProjectedColumns.aggregation()).isEqualTo(Optional.of(aggregation));
+        assertThat(withProjectedColumns.projectedColumns()).containsExactly(countCol);
     }
 }
