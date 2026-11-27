@@ -619,13 +619,7 @@ public class MongoMetadata
         }
 
         return Optional.of(new LimitApplicationResult<>(
-                new MongoTableHandle(
-                        handle.schemaTableName(),
-                        handle.remoteTableName(),
-                        handle.filter(),
-                        handle.constraint(),
-                        handle.projectedColumns(),
-                        OptionalInt.of(toIntExact(limit))),
+                handle.withLimit(OptionalInt.of(toIntExact(limit))),
                 true,
                 false));
     }
@@ -634,6 +628,9 @@ public class MongoMetadata
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
     {
         MongoTableHandle handle = (MongoTableHandle) table;
+        if (handle.aggregation().isPresent()) {
+            return Optional.empty();
+        }
 
         TupleDomain<ColumnHandle> oldDomain = handle.constraint();
         TupleDomain<ColumnHandle> newDomain = oldDomain.intersect(constraint.getSummary());
@@ -666,13 +663,7 @@ public class MongoMetadata
             return Optional.empty();
         }
 
-        handle = new MongoTableHandle(
-                handle.schemaTableName(),
-                handle.remoteTableName(),
-                handle.filter(),
-                newDomain,
-                handle.projectedColumns(),
-                handle.limit());
+        handle = handle.withConstraint(newDomain);
 
         return Optional.of(new ConstraintApplicationResult<>(handle, remainingFilter, constraint.getExpression(), false));
     }
