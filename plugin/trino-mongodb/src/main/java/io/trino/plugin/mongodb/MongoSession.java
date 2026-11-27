@@ -14,6 +14,7 @@
 package io.trino.plugin.mongodb;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Splitter;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.cache.Cache;
@@ -69,6 +70,7 @@ import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
 import org.bson.BsonDocument;
 import org.bson.BsonInt32;
+import org.bson.BsonString;
 import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.types.Binary;
@@ -91,6 +93,7 @@ import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.function.BiFunction;
 import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -189,6 +192,7 @@ public class MongoSession
     private final int cursorBatchSize;
 
     private final Cache<SchemaTableName, MongoTable> tableCache;
+    private final Cache<String, Map<String, List<HostAddress>>> shardAddressesCache;
     private final String implicitPrefix;
 
     public MongoSession(TypeManager typeManager, Supplier<MongoClient> client, MongoClientConfig config)
@@ -203,6 +207,9 @@ public class MongoSession
 
         this.tableCache = EvictableCacheBuilder.newBuilder()
                 .expireAfterWrite(1, MINUTES)  // TODO: Configure
+                .build();
+        this.shardAddressesCache = EvictableCacheBuilder.newBuilder()
+                .expireAfterWrite(1, MINUTES)
                 .build();
     }
 
@@ -589,6 +596,117 @@ public class MongoSession
         }
         MongoCollection<Document> collection = getClient().getDatabase(schemaName).getCollection(tableName);
         return MongoIndex.parse(collection.listIndexes());
+    }
+
+    public Optional<MongoShardedCollectionMetadata> getShardedCollectionMetadata(RemoteTableName remoteTableName)
+    {
+        String namespace = remoteTableName.databaseName() + "." + remoteTableName.collectionName();
+        MongoCollection<BsonDocument> collection = getClient().getDatabase("config").getCollection("collections", BsonDocument.class);
+        BsonDocument doc = collection.find(new BsonDocument("_id", new BsonString(namespace))).first();
+        if (doc == null) {
+            return Optional.empty();
+        }
+        if (doc.containsKey("dropped") && doc.get("dropped").isBoolean() && doc.getBoolean("dropped").getValue()) {
+            return Optional.empty();
+        }
+        if (!doc.containsKey("key") || !doc.get("key").isDocument()) {
+            return Optional.empty();
+        }
+        BsonDocument shardKey = doc.getDocument("key");
+        Optional<BsonValue> uuid = Optional.ofNullable(doc.get("uuid"));
+        return Optional.of(new MongoShardedCollectionMetadata(shardKey, uuid));
+    }
+
+    public List<MongoChunk> getChunks(RemoteTableName remoteTableName, MongoShardedCollectionMetadata metadata)
+    {
+        MongoCollection<BsonDocument> collection = getClient().getDatabase("config").getCollection("chunks", BsonDocument.class);
+        return getChunks(remoteTableName, metadata, (filter, sort) -> fetchChunks(collection, filter, sort));
+    }
+
+    @VisibleForTesting
+    static List<MongoChunk> getChunks(
+            RemoteTableName remoteTableName,
+            MongoShardedCollectionMetadata metadata,
+            BiFunction<BsonDocument, BsonDocument, List<MongoChunk>> chunkFetcher)
+    {
+        BsonDocument sort = new BsonDocument("min", new BsonInt32(1));
+
+        List<MongoChunk> chunks = ImmutableList.of();
+        if (metadata.uuid().isPresent()) {
+            chunks = chunkFetcher.apply(new BsonDocument("uuid", metadata.uuid().get()), sort);
+        }
+        if (chunks.isEmpty()) {
+            String namespace = remoteTableName.databaseName() + "." + remoteTableName.collectionName();
+            chunks = chunkFetcher.apply(new BsonDocument("ns", new BsonString(namespace)), sort);
+        }
+        return chunks;
+    }
+
+    private static List<MongoChunk> fetchChunks(MongoCollection<BsonDocument> collection, BsonDocument filter, BsonDocument sort)
+    {
+        ImmutableList.Builder<MongoChunk> builder = ImmutableList.builder();
+        try (MongoCursor<BsonDocument> cursor = collection.find(filter).sort(sort).iterator()) {
+            while (cursor.hasNext()) {
+                BsonDocument doc = cursor.next();
+                if (!doc.containsKey("min") || !doc.get("min").isDocument()
+                        || !doc.containsKey("max") || !doc.get("max").isDocument()) {
+                    continue;
+                }
+                BsonDocument min = doc.getDocument("min");
+                BsonDocument max = doc.getDocument("max");
+                String shardId = doc.containsKey("shard") && doc.get("shard").isString()
+                        ? doc.getString("shard").getValue()
+                        : "";
+                builder.add(new MongoChunk(min, max, shardId));
+            }
+        }
+        return builder.build();
+    }
+
+    public Map<String, List<HostAddress>> getShardAddresses()
+    {
+        try {
+            return shardAddressesCache.get("", this::loadShardAddresses);
+        }
+        catch (ExecutionException | UncheckedExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause != null) {
+                throwIfInstanceOf(cause, TrinoException.class);
+                if (cause instanceof MongoCommandException) {
+                    throw new TrinoException(MONGODB_CLUSTER_ERROR, cause);
+                }
+            }
+            throw new RuntimeException(e);
+        }
+    }
+
+    private Map<String, List<HostAddress>> loadShardAddresses()
+    {
+        MongoCollection<Document> collection = getClient().getDatabase("config").getCollection("shards");
+        ImmutableMap.Builder<String, List<HostAddress>> builder = ImmutableMap.builder();
+        try (MongoCursor<Document> cursor = collection.find().iterator()) {
+            while (cursor.hasNext()) {
+                Document doc = cursor.next();
+                String shardId = doc.getString("_id");
+                String host = doc.getString("host");
+                if (shardId != null && host != null) {
+                    builder.put(shardId, parseHostAddresses(host));
+                }
+            }
+        }
+        return builder.buildKeepingLast();
+    }
+
+    @VisibleForTesting
+    static List<HostAddress> parseHostAddresses(String host)
+    {
+        int slashIndex = host.indexOf('/');
+        String hostsPart = slashIndex >= 0 ? host.substring(slashIndex + 1) : host;
+        ImmutableList.Builder<HostAddress> builder = ImmutableList.builder();
+        for (String part : Splitter.on(',').trimResults().omitEmptyStrings().split(hostsPart)) {
+            builder.add(HostAddress.fromString(part));
+        }
+        return builder.build();
     }
 
     public long deleteDocuments(RemoteTableName remoteTableName, TupleDomain<ColumnHandle> constraint)
