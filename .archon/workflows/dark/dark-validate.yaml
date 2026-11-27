@@ -1,0 +1,311 @@
+name: dark-validate
+description: Project-level validation DAG with split fast deterministic gate and qualitative human review
+internal: true
+model: medium
+inputs:
+  scope:
+    default: ""
+    description: Optional submodule path or scope (e.g. plugin/trino-mongodb)
+  target_branch:
+    default: master
+    description: Target base branch for commit inspection (default master)
+returns: qualitative-review
+outcome_field: green
+
+nodes:
+  - id: deterministic-gate
+    bash: |
+      set -eo pipefail
+
+      TARGET_BRANCH="$INPUTS.target_branch"
+      TARGET_BRANCH="${TARGET_BRANCH:-master}"
+      SCOPE="$INPUTS.scope"
+      SCOPE="${SCOPE:-}"
+      ARTIFACTS_DIR="${ARTIFACTS_DIR:-$PWD/artifacts}"
+      mkdir -p "$ARTIFACTS_DIR"
+
+      VAL_MD="$ARTIFACTS_DIR/validation.md"
+      GATE_JSON="$ARTIFACTS_DIR/gate-summary.json"
+
+      ERRORS=()
+
+      # Step 1: Trailing Newlines Verification
+      echo "=== Step 1: Trailing Newlines Verification ==="
+      BASE_REF="origin/$TARGET_BRANCH"
+      if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+        BASE_REF="$TARGET_BRANCH"
+      fi
+
+      DIFF_BASE=$(git merge-base HEAD "$BASE_REF" 2>/dev/null || echo "$BASE_REF")
+      MODIFIED_FILES=$(git diff --name-only "$DIFF_BASE" HEAD 2>/dev/null || true)
+
+      TRAILING_NL_FAILED=()
+      while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        if [ -f "$file" ]; then
+          if [ -s "$file" ]; then
+            LAST_BYTE=$(tail -c 1 "$file" | od -An -tx1 | tr -d ' \n')
+            if [ "$LAST_BYTE" != "0a" ]; then
+              TRAILING_NL_FAILED+=("$file")
+            fi
+          fi
+        fi
+      done <<< "$MODIFIED_FILES"
+
+      if [ ${#TRAILING_NL_FAILED[@]} -gt 0 ]; then
+        ERRORS+=("Missing trailing newline in files: ${TRAILING_NL_FAILED[*]}")
+        echo "FAIL: Trailing newline check failed on: ${TRAILING_NL_FAILED[*]}"
+      else
+        echo "PASS: Trailing newline check clean."
+      fi
+
+      # Step 2: Airlift Commit Message Structure
+      echo "=== Step 2: Airlift Commit Message Structure ==="
+      COMMITS=$(git rev-list "$DIFF_BASE..HEAD" 2>/dev/null || git rev-list -n 1 HEAD)
+      COMMIT_ERRORS=()
+
+      for commit in $COMMITS; do
+        SUBJECT=$(git log -1 --format="%s" "$commit")
+        BODY=$(git log -1 --format="%b" "$commit")
+
+        SUBJECT_LEN=${#SUBJECT}
+        if [ "$SUBJECT_LEN" -gt 60 ]; then
+          COMMIT_ERRORS+=("Commit $commit subject exceeds 60 characters (actual: $SUBJECT_LEN)")
+        fi
+
+        if ! [[ "$SUBJECT" =~ ^[A-Z] ]]; then
+          COMMIT_ERRORS+=("Commit $commit subject must begin with a capital letter (subject: '$SUBJECT')")
+        fi
+
+        if [[ "$SUBJECT" =~ \.$ ]]; then
+          COMMIT_ERRORS+=("Commit $commit subject must not end with a period (subject: '$SUBJECT')")
+        fi
+
+        FIRST_WORD=$(echo "$SUBJECT" | awk '{print $1}' | tr -d ':,')
+        if [[ "$FIRST_WORD" =~ (Added|Fixed|Updated|Removed|Changed|Implemented|Resolved) ]]; then
+          COMMIT_ERRORS+=("Commit $commit uses past-tense verb '$FIRST_WORD'; imperative mood required")
+        fi
+
+        if [ -n "$BODY" ]; then
+          LINE_NUM=0
+          while IFS= read -r line; do
+            LINE_NUM=$((LINE_NUM + 1))
+            if [[ "$line" =~ ^Signed-off-by: ]] || [[ "$line" =~ https?:// ]]; then
+              continue
+            fi
+            if [ ${#line} -gt 72 ]; then
+              COMMIT_ERRORS+=("Commit $commit body line $LINE_NUM exceeds 72 characters (length: ${#line})")
+              break
+            fi
+          done <<< "$BODY"
+        fi
+      done
+
+      if [ ${#COMMIT_ERRORS[@]} -gt 0 ]; then
+        for ce in "${COMMIT_ERRORS[@]}"; do
+          ERRORS+=("$ce")
+          echo "FAIL: $ce"
+        done
+      else
+        echo "PASS: Commit message structure clean."
+      fi
+
+      # Step 3: PR Link & Structural Rules
+      echo "=== Step 3: PR Link & Structural Rules ==="
+      PR_BODY=""
+      if command -v gh >/dev/null 2>&1; then
+        PR_BODY=$(gh pr view --json body -q .body 2>/dev/null || true)
+      fi
+      if [ -z "$PR_BODY" ] && [ -f "$ARTIFACTS_DIR/pr-description.md" ]; then
+        PR_BODY=$(cat "$ARTIFACTS_DIR/pr-description.md")
+      fi
+      if [ -z "$PR_BODY" ]; then
+        PR_BODY=$(git log -1 --format="%b" HEAD 2>/dev/null || true)
+      fi
+
+      if [ -n "$PR_BODY" ]; then
+        FIRST_NON_EMPTY=$(echo "$PR_BODY" | grep -v '^[[:space:]]*$' | head -n 1 || true)
+        if [ -n "$FIRST_NON_EMPTY" ] && ! [[ "$FIRST_NON_EMPTY" =~ ^[[:space:]]*([A-Z]|#) ]]; then
+          ERRORS+=("PR description must start with a capital letter")
+          echo "FAIL: PR description does not start with a capital letter"
+        fi
+
+        while IFS= read -r line; do
+          if [[ "$line" =~ (fixes|closes|resolves)[[:space:]]+#[0-9]+ ]]; then
+            if ! [[ "$line" =~ ^[[:space:]]*[-*][[:space:]] ]]; then
+              ERRORS+=("Issue-closing directives (e.g. closes #123) must reside on bulleted list items starting with '-' or '*'")
+              echo "FAIL: Issue-closing directive found outside bulleted item: $line"
+              break
+            fi
+          fi
+        done <<< "$PR_BODY"
+      fi
+
+      # Step 4: Module Auto-Discovery
+      echo "=== Step 4: Module Auto-Discovery ==="
+      TARGET_MODULE="$SCOPE"
+      if [ -z "$TARGET_MODULE" ]; then
+        DETECTED_MODULES=$(echo "$MODIFIED_FILES" | grep -E '^(plugin|core|lib|client)/' | cut -d/ -f1-2 | sort -u || true)
+        COUNT=$(echo "$DETECTED_MODULES" | grep -c . || true)
+        if [ "$COUNT" -eq 1 ]; then
+          TARGET_MODULE="$DETECTED_MODULES"
+          echo "Auto-detected target module: $TARGET_MODULE"
+        elif [ "$COUNT" -gt 1 ]; then
+          echo "Multiple modules modified: $DETECTED_MODULES"
+          TARGET_MODULE=$(echo "$DETECTED_MODULES" | tr '\n' ',' | sed 's/,$//')
+        fi
+      fi
+
+      JAVA_OR_POM_CHANGED=false
+      if echo "$MODIFIED_FILES" | grep -qE '(\.java$|pom\.xml$)'; then
+        JAVA_OR_POM_CHANGED=true
+      fi
+
+      TESTS_RUN=()
+      if [ "$JAVA_OR_POM_CHANGED" = true ] && [ -n "$TARGET_MODULE" ]; then
+        echo "=== Step 5: Scoped Fast Maven Checks for module: $TARGET_MODULE ==="
+
+        echo "Running airstyle check..."
+        if ! ./mvnw airstyle:check -pl "$TARGET_MODULE"; then
+          ERRORS+=("Airstyle check failed on $TARGET_MODULE")
+        fi
+
+        echo "Running license check..."
+        if ! ./mvnw license:check -pl "$TARGET_MODULE"; then
+          ERRORS+=("License check failed on $TARGET_MODULE")
+        fi
+
+        echo "Running sortpom verify..."
+        if ! ./mvnw sortpom:verify -pl "$TARGET_MODULE"; then
+          ERRORS+=("POM sort verification failed on $TARGET_MODULE")
+        fi
+
+        echo "Running Error Prone test-compile..."
+        if ! ./mvnw clean test-compile -Dair.check.skip-all=true -P errorprone-compiler -pl "$TARGET_MODULE" -am; then
+          ERRORS+=("Error Prone test-compile failed on $TARGET_MODULE")
+        fi
+
+        echo "Running scoped unit tests..."
+        CHANGED_TESTS=$(echo "$MODIFIED_FILES" | grep -E '(Test[^/]*\.java|[^/]*Test\.java)$' | xargs -r -n1 basename | sed 's/\.java$//' | grep -vE '(Smoke|QueryRunner|Container|Integration)' | tr '\n' ',' | sed 's/,$//' || true)
+
+        TEST_ARG=""
+        if [ -n "$CHANGED_TESTS" ]; then
+          TEST_ARG="-Dtest=$CHANGED_TESTS"
+          TESTS_RUN+=("$CHANGED_TESTS")
+        elif [ "$TARGET_MODULE" = "plugin/trino-mongodb" ]; then
+          TEST_ARG="-Dtest=TestMongoClientConfig,TestMongoSessionProperties,TestMongoTableHandle,TestMongoSplit"
+          TESTS_RUN+=("TestMongoClientConfig,TestMongoSessionProperties,TestMongoTableHandle,TestMongoSplit")
+        fi
+
+        if [ -n "$TEST_ARG" ]; then
+          echo "Executing test command: ./mvnw test -Dair.check.skip-all=true -pl $TARGET_MODULE -am $TEST_ARG"
+          if ! ./mvnw test -Dair.check.skip-all=true -pl "$TARGET_MODULE" -am "$TEST_ARG"; then
+            ERRORS+=("Unit tests execution failed: $TEST_ARG")
+          fi
+        else
+          echo "No targeted in-memory unit tests identified for module: $TARGET_MODULE"
+        fi
+      else
+        echo "No Java/POM modifications detected in scoped modules; skipping Maven test-compile and test runs."
+      fi
+
+      # Step 6: Artifacts Generation
+      echo "=== Step 6: Artifact Generation ==="
+      if [ ${#ERRORS[@]} -eq 0 ]; then
+        GATE_STATUS="passed"
+        {
+          echo "# Validation Report"
+          echo ""
+          echo "## Status"
+          echo "PASSED"
+          echo ""
+          echo "## Summary"
+          echo "All deterministic checks completed with clean status."
+          echo "- Trailing newline verification: SUCCESS"
+          echo "- Commit message format verification: SUCCESS"
+          echo "- PR link and structure verification: SUCCESS"
+          echo "- Scoped module build and unit tests: SUCCESS"
+          echo ""
+        } > "$VAL_MD"
+        if [ ${#TESTS_RUN[@]} -gt 0 ]; then
+          echo "Tests verified: ${TESTS_RUN[*]}" >> "$VAL_MD"
+        fi
+      else
+        GATE_STATUS="failed"
+        {
+          echo "# Validation Report"
+          echo ""
+          echo "## Status"
+          echo "FAILED"
+          echo ""
+          echo "## Summary"
+          echo "Validation encountered the following issues:"
+          for err in "${ERRORS[@]}"; do
+            echo "- $err"
+          done
+        } > "$VAL_MD"
+      fi
+
+      if command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json, sys; status, module, tests, body, errors, out_path = sys.argv[1:7]; payload = {'gate_status': status, 'module': module, 'tests_run': [t for t in tests.split(',') if t], 'pr_body': body, 'errors': [e for e in errors.split(';;') if e]}; open(out_path, 'w', encoding='utf-8').write(json.dumps(payload, indent=2))" "$GATE_STATUS" "$TARGET_MODULE" "${TESTS_RUN[*]}" "$PR_BODY" "$(IFS=';;'; echo "${ERRORS[*]}")" "$GATE_JSON"
+      else
+        {
+          echo "{"
+          echo "  \"gate_status\": \"$GATE_STATUS\","
+          echo "  \"module\": \"$TARGET_MODULE\","
+          echo "  \"tests_run\": [\"${TESTS_RUN[*]}\"],"
+          echo "  \"pr_body\": $(echo "$PR_BODY" | jq -Rs . 2>/dev/null || echo '""'),"
+          echo "  \"errors\": $(printf '%s\n' "${ERRORS[@]}" | jq -R . | jq -s . 2>/dev/null || echo '[]')"
+          echo "}"
+        } > "$GATE_JSON"
+      fi
+
+      echo "Deterministic gate completed with status: $GATE_STATUS"
+      cat "$GATE_JSON"
+
+  - id: qualitative-review
+    depends_on: [deterministic-gate]
+    trigger_rule: all_done
+    prompt: |
+      # Qualitative Review & Validation Verdict
+
+      You are conducting a qualitative review and synthesizing the final validation verdict for a Trino pull request.
+
+      ## 1. Inspect Deterministic Gate Results
+      Read `$ARTIFACTS_DIR/gate-summary.json` and `$ARTIFACTS_DIR/validation.md` directly from disk using your read tool.
+      If `gate_status` in `$ARTIFACTS_DIR/gate-summary.json` is "failed":
+      - The verdict MUST be `green: false` with `red_cause: "introduced"`.
+      - Summarize the specific deterministic failures in `summary`.
+
+      ## 2. Inspect PR Description Context
+      Read the PR description from `$ARTIFACTS_DIR/pr-description.md` or fetch the body via `gh pr view --json body`.
+
+      ## 3. Qualitative Anti-AI Heuristic Audit ("Does this smell like AI?" test)
+      Evaluate the PR description and commit notes against the Senior Human Contributor standard:
+      - **Prohibit em-dashes (`—`)**: Any em-dash in PR prose or commit messages is an instant failure.
+      - **Prohibit emojis**: Zero emojis of any kind.
+      - **Prohibit conversational boilerplate**: No greetings, pleasantries, or formulaic intro phrasing (e.g. "We are pleased to introduce...", "This pull request introduces...", "Summary of changes:").
+      - **Prohibit repetitive parroting**: No bullet lists that merely repeat file diffs or lecture on basic, well-known Trino engine mechanics that any reviewer already knows.
+      - **Crisp, Low-Verbosity Tone**: Direct, respectful, technical prose explaining *what* was changed and *why*.
+
+      ## 4. Capitalization & Link Formatting
+      - Confirm the PR description begins with a capital letter.
+      - Confirm issue closing references (`fixes #...`, `closes #...`) are formatted cleanly on bulleted items.
+
+      ## 5. Declare Final Verdict
+      - If deterministic checks passed (`gate_status == "passed"`) AND all qualitative style directives pass:
+        Emit `green: true`, `red_cause: ""`, `summary: "All deterministic checks and qualitative style reviews passed clean."`
+      - If any check failed or qualitative rule was violated:
+        Emit `green: false`, `red_cause: "introduced"`, with a clear explanation of the defect in `summary`.
+    output_type: validation
+    output_format:
+      type: object
+      properties:
+        green:
+          type: boolean
+        red_cause:
+          type: string
+          enum: [introduced, inherited, environment, ""]
+        summary:
+          type: string
+      required: [green, red_cause, summary]
