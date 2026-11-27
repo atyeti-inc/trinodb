@@ -31,17 +31,18 @@
 ## 3. Verification & Test Harness Contract
 - **Modular Scoping Invariant**: Never run root `./mvnw test` without module scoping (`-pl <module>`), as full repository test suites take 30–60+ minutes. All test and compile commands must be scoped to the touched module.
 - **Inter-Module Dependency Invariant**: When targeting submodules in the reactor, always pass `-am` (`--also-make`) so reactor SNAPSHOT dependencies are compiled locally instead of failing on remote lookup.
-- **Test Runner & Verification**:
-  - Single test class: `./mvnw test -Dair.check.skip-all=true -pl <module> -am -Dtest=<TestClass>`
-  - Module tests: `./mvnw test -Dair.check.skip-all=true -pl <module> -am`
-- **Lint / Typecheck**:
+- **Fast Local Validation Contract (< 2 min)**:
+  - Trailing newline check: Verify all git-modified text files end with `\n` (ignoring deleted paths).
+  - Airlift commit message compliance: Validate commit subject and body structure.
+  - PR description structural rules: Capital letter start, issue-closing directives on `- ` or `* ` bullets.
   - Airstyle verification: `./mvnw airstyle:check -pl <module>`
   - Airstyle auto-format: `./mvnw airstyle:format -pl <module> -Dincludes=**/<FileName>.java`
-  - Error Prone static analysis: `./mvnw clean test-compile -Dair.check.skip-all=true -P errorprone-compiler -pl <module> -am`
-  - Static checks & Javadoc: `./mvnw verify -DskipTests -P ci -pl <module> -am`
-  - License validation: `./mvnw license:check`
-  - POM format check: `./mvnw sortpom:verify`
-  - Frontend Web UI verification: `bun run verify` (in `core/trino-web-ui/src/main/resources/webapp`)
+  - License header check: `./mvnw license:check -pl <module>`
+  - POM formatting check: `./mvnw sortpom:verify -pl <module>`
+  - Static analysis & Error Prone: `./mvnw clean test-compile -Dair.check.skip-all=true -P errorprone-compiler -pl <module> -am`
+  - Scoped in-memory unit tests: Pure Java unit tests scoped by concrete class name (`./mvnw test -Dair.check.skip-all=true -pl <module> -am -Dtest=<TestClass>`), explicitly excluding Testcontainers/Docker integration tests.
+  - Frontend Web UI verification: `bun run verify` (in `core/trino-web-ui/src/main/resources/webapp` when UI is modified)
+- **CI-Exclusive Test Boundaries**: Full reactor builds, full unscoped module tests (`./mvnw test -pl <module>`), full reactor verification profiles (`./mvnw verify -DskipTests -P ci -pl <module> -am`), Docker Testcontainers suites, Product Test Launcher (PTL) suites, and multi-JDK matrix tests belong exclusively to GitHub Actions CI and are strictly prohibited in local validation runs.
 - **Test Isolation & Sandbox Requirements**: Write deterministic tests with hand-crafted mocks; use AssertJ for complex assertions and Airlift `Assertions` where applicable.
 - **Pass Criteria**: Zero compilation errors, zero test regressions, clean airstyle/checkstyle checks, clean working tree.
 
