@@ -24,11 +24,19 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.Type;
+import org.bson.BsonBinary;
+import org.bson.BsonDocument;
+import org.bson.BsonInt32;
+import org.bson.BsonMaxKey;
+import org.bson.BsonMinKey;
+import org.bson.BsonString;
 import org.bson.Document;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.mongodb.MongoErrorCode.MONGODB_CLUSTER_ERROR;
@@ -361,6 +369,111 @@ public class TestMongoSession
         assertThat(filter).isEqualTo(new Document());
 
         assertThat(MongoSession.buildFilter(tableHandle)).isEqualTo(new Document());
+    }
+
+    @Test
+    public void testGetChunksWithUuid()
+    {
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        BsonBinary uuid = new BsonBinary(UUID.randomUUID());
+        MongoShardedCollectionMetadata metadata = new MongoShardedCollectionMetadata(
+                new BsonDocument("_id", new BsonInt32(1)),
+                Optional.of(uuid));
+
+        MongoChunk expectedChunk = new MongoChunk(
+                new BsonDocument("_id", new BsonMinKey()),
+                new BsonDocument("_id", new BsonMaxKey()),
+                "shard0");
+
+        List<BsonDocument> capturedFilters = new ArrayList<>();
+        List<BsonDocument> capturedSorts = new ArrayList<>();
+
+        List<MongoChunk> chunks = MongoSession.getChunks(
+                remoteTableName,
+                metadata,
+                (filter, sort) -> {
+                    capturedFilters.add(filter);
+                    capturedSorts.add(sort);
+                    if (filter.containsKey("uuid")) {
+                        return List.of(expectedChunk);
+                    }
+                    return List.of();
+                });
+
+        assertThat(chunks).containsExactly(expectedChunk);
+        assertThat(capturedFilters).containsExactly(new BsonDocument("uuid", uuid));
+        assertThat(capturedSorts).containsExactly(new BsonDocument("min", new BsonInt32(1)));
+    }
+
+    @Test
+    public void testGetChunksUuidFallbackToNamespace()
+    {
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        BsonBinary uuid = new BsonBinary(UUID.randomUUID());
+        MongoShardedCollectionMetadata metadata = new MongoShardedCollectionMetadata(
+                new BsonDocument("_id", new BsonInt32(1)),
+                Optional.of(uuid));
+
+        MongoChunk expectedChunk = new MongoChunk(
+                new BsonDocument("_id", new BsonMinKey()),
+                new BsonDocument("_id", new BsonMaxKey()),
+                "shard0");
+
+        List<BsonDocument> capturedFilters = new ArrayList<>();
+        List<BsonDocument> capturedSorts = new ArrayList<>();
+
+        List<MongoChunk> chunks = MongoSession.getChunks(
+                remoteTableName,
+                metadata,
+                (filter, sort) -> {
+                    capturedFilters.add(filter);
+                    capturedSorts.add(sort);
+                    if (filter.containsKey("uuid")) {
+                        return List.of();
+                    }
+                    if (filter.containsKey("ns")) {
+                        return List.of(expectedChunk);
+                    }
+                    return List.of();
+                });
+
+        assertThat(chunks).containsExactly(expectedChunk);
+        assertThat(capturedFilters).containsExactly(
+                new BsonDocument("uuid", uuid),
+                new BsonDocument("ns", new BsonString("schema.table")));
+        assertThat(capturedSorts).containsExactly(
+                new BsonDocument("min", new BsonInt32(1)),
+                new BsonDocument("min", new BsonInt32(1)));
+    }
+
+    @Test
+    public void testGetChunksNamespaceOnlyWhenUuidAbsent()
+    {
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoShardedCollectionMetadata metadata = new MongoShardedCollectionMetadata(
+                new BsonDocument("_id", new BsonInt32(1)),
+                Optional.empty());
+
+        MongoChunk expectedChunk = new MongoChunk(
+                new BsonDocument("_id", new BsonMinKey()),
+                new BsonDocument("_id", new BsonMaxKey()),
+                "shard0");
+
+        List<BsonDocument> capturedFilters = new ArrayList<>();
+        List<BsonDocument> capturedSorts = new ArrayList<>();
+
+        List<MongoChunk> chunks = MongoSession.getChunks(
+                remoteTableName,
+                metadata,
+                (filter, sort) -> {
+                    capturedFilters.add(filter);
+                    capturedSorts.add(sort);
+                    return List.of(expectedChunk);
+                });
+
+        assertThat(chunks).containsExactly(expectedChunk);
+        assertThat(capturedFilters).containsExactly(new BsonDocument("ns", new BsonString("schema.table")));
+        assertThat(capturedSorts).containsExactly(new BsonDocument("min", new BsonInt32(1)));
     }
 
     private static MongoColumnHandle createColumnHandle(String baseName, Type type, String... dereferenceNames)
