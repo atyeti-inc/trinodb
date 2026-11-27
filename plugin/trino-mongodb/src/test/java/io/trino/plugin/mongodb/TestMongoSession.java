@@ -296,6 +296,73 @@ public class TestMongoSession
                 .hasSize(1);
     }
 
+    @Test
+    public void testBuildFilterWithConstraintAndSplitBounds()
+    {
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("test", "test"),
+                new RemoteTableName("test", "test"),
+                Optional.empty())
+                .withConstraint(TupleDomain.withColumnDomains(ImmutableMap.of(
+                        COL1, Domain.create(ValueSet.ofRanges(greaterThan(BIGINT, 100L)), false))));
+
+        Document splitFilter = new Document("_id", new Document("$gte", 0).append("$lt", 50));
+        Document filter = MongoSession.buildFilter(tableHandle, Optional.of(splitFilter));
+
+        Document expected = new Document("$and", ImmutableList.of(
+                new Document(COL1.baseName(), new Document("$gt", 100L)),
+                splitFilter));
+        assertThat(filter).isEqualTo(expected);
+    }
+
+    @Test
+    public void testBuildFilterWithPtfAndConstraintAndSplitBounds()
+    {
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("test", "test"),
+                new RemoteTableName("test", "test"),
+                Optional.of("{\"ptf_col\": \"value\"}"))
+                .withConstraint(TupleDomain.withColumnDomains(ImmutableMap.of(
+                        COL1, Domain.create(ValueSet.ofRanges(greaterThan(BIGINT, 100L)), false))));
+
+        Document splitFilter = new Document("_id", new Document("$gte", 0).append("$lt", 50));
+        Document filter = MongoSession.buildFilter(tableHandle, Optional.of(splitFilter));
+
+        Document expected = new Document("$and", ImmutableList.of(
+                new Document("ptf_col", "value"),
+                new Document(COL1.baseName(), new Document("$gt", 100L)),
+                splitFilter));
+        assertThat(filter).isEqualTo(expected);
+    }
+
+    @Test
+    public void testBuildFilterWithOnlySplitBounds()
+    {
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("test", "test"),
+                new RemoteTableName("test", "test"),
+                Optional.empty());
+
+        Document splitFilter = new Document("_id", new Document("$gte", 0).append("$lt", 50));
+        Document filter = MongoSession.buildFilter(tableHandle, Optional.of(splitFilter));
+
+        assertThat(filter).isEqualTo(splitFilter);
+    }
+
+    @Test
+    public void testBuildFilterEmpty()
+    {
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("test", "test"),
+                new RemoteTableName("test", "test"),
+                Optional.empty());
+
+        Document filter = MongoSession.buildFilter(tableHandle, Optional.empty());
+        assertThat(filter).isEqualTo(new Document());
+
+        assertThat(MongoSession.buildFilter(tableHandle)).isEqualTo(new Document());
+    }
+
     private static MongoColumnHandle createColumnHandle(String baseName, Type type, String... dereferenceNames)
     {
         return new MongoColumnHandle(

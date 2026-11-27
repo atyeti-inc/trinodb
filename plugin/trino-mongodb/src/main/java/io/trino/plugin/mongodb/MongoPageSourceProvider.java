@@ -59,6 +59,7 @@ public class MongoPageSourceProvider
             List<ColumnHandle> columns,
             DynamicFilter dynamicFilter)
     {
+        MongoSplit mongoSplit = (MongoSplit) requireNonNull(split, "split is null");
         MongoTableHandle tableHandle = (MongoTableHandle) table;
 
         ImmutableList.Builder<MongoColumnHandle> handles = ImmutableList.builder();
@@ -86,6 +87,6 @@ public class MongoPageSourceProvider
             return new EmptyPageSource();
         }
 
-        return new MongoPageSource(mongoSession, newTableHandle, handles.build(), implicitPrefix);
+        return new MongoPageSource(mongoSession, newTableHandle, handles.build(), implicitPrefix, mongoSplit.getPartitionBounds());
     }
 }
