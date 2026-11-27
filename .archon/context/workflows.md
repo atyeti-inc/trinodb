@@ -31,19 +31,7 @@
 ## 3. Verification & Test Harness Contract
 - **Modular Scoping Invariant**: Never run root `./mvnw test` without module scoping (`-pl <module>`), as full repository test suites take 30–60+ minutes. All test and compile commands must be scoped to the touched module.
 - **Inter-Module Dependency Invariant**: When targeting submodules in the reactor, always pass `-am` (`--also-make`) so reactor SNAPSHOT dependencies are compiled locally instead of failing on remote lookup.
-- **Test Runner & Verification**:
-  - Single test class: `./mvnw test -Dair.check.skip-all=true -pl <module> -am -Dtest=<TestClass>`
-  - Module tests: `./mvnw test -Dair.check.skip-all=true -pl <module> -am`
-- **Lint / Typecheck**:
-  - Airstyle verification: `./mvnw airstyle:check -pl <module>`
-  - Airstyle auto-format: `./mvnw airstyle:format -pl <module> -Dincludes=**/<FileName>.java`
-  - Error Prone static analysis: `./mvnw clean test-compile -Dair.check.skip-all=true -P errorprone-compiler -pl <module> -am`
-  - Static checks & Javadoc: `./mvnw verify -DskipTests -P ci -pl <module> -am`
-  - License validation: `./mvnw license:check`
-  - POM format check: `./mvnw sortpom:verify`
-  - Frontend Web UI verification: `bun run verify` (in `core/trino-web-ui/src/main/resources/webapp`)
 - **Test Isolation & Sandbox Requirements**: Write deterministic tests with hand-crafted mocks; use AssertJ for complex assertions and Airlift `Assertions` where applicable.
-- **Pass Criteria**: Zero compilation errors, zero test regressions, clean airstyle/checkstyle checks, clean working tree.
 
 ## 4. Code Style & Design Invariants
 - **Typing Discipline**: Strict Java 25 static typing. Use `var` only when the explicit type is obvious from a constructor initializer; avoid `var` when inferred types obscure clarity. Annotate SQL and regex parameters with `@org.intellij.lang.annotations.Language`.
