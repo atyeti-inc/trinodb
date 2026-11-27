@@ -619,13 +619,7 @@ public class MongoMetadata
         }
 
         return Optional.of(new LimitApplicationResult<>(
-                new MongoTableHandle(
-                        handle.schemaTableName(),
-                        handle.remoteTableName(),
-                        handle.filter(),
-                        handle.constraint(),
-                        handle.projectedColumns(),
-                        OptionalInt.of(toIntExact(limit))),
+                handle.withLimit(OptionalInt.of(toIntExact(limit))),
                 true,
                 false));
     }
@@ -634,6 +628,10 @@ public class MongoMetadata
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
     {
         MongoTableHandle handle = (MongoTableHandle) table;
+
+        if (handle.aggregation().isPresent()) {
+            return Optional.empty();
+        }
 
         TupleDomain<ColumnHandle> oldDomain = handle.constraint();
         TupleDomain<ColumnHandle> newDomain = oldDomain.intersect(constraint.getSummary());
@@ -666,13 +664,7 @@ public class MongoMetadata
             return Optional.empty();
         }
 
-        handle = new MongoTableHandle(
-                handle.schemaTableName(),
-                handle.remoteTableName(),
-                handle.filter(),
-                newDomain,
-                handle.projectedColumns(),
-                handle.limit());
+        handle = handle.withConstraint(newDomain);
 
         return Optional.of(new ConstraintApplicationResult<>(handle, remainingFilter, constraint.getExpression(), false));
     }
@@ -687,6 +679,11 @@ public class MongoMetadata
         if (!isProjectionPushdownEnabled(session)) {
             return Optional.empty();
         }
+        MongoTableHandle mongoTableHandle = (MongoTableHandle) handle;
+        if (mongoTableHandle.aggregation().isPresent()) {
+            return Optional.empty();
+        }
+
         // Create projected column representations for supported sub expressions. Simple column references and chain of
         // dereferences on a variable are supported right now.
         Set<ConnectorExpression> projectedExpressions = projections.stream()
@@ -695,8 +692,6 @@ public class MongoMetadata
 
         Map<ConnectorExpression, ProjectedColumnRepresentation> columnProjections = projectedExpressions.stream()
                 .collect(toImmutableMap(identity(), ApplyProjectionUtil::createProjectedColumnRepresentation));
-
-        MongoTableHandle mongoTableHandle = (MongoTableHandle) handle;
 
         // all references are simple variables
         if (columnProjections.values().stream().allMatch(ProjectedColumnRepresentation::isVariable)) {

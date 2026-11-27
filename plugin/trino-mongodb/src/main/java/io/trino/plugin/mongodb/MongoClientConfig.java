@@ -50,6 +50,7 @@ public class MongoClientConfig
     private String requiredReplicaSetName;
     private String implicitRowFieldPrefix = "_pos";
     private boolean projectionPushDownEnabled = true;
+    private boolean aggregationPushdownEnabled = true;
     private boolean allowLocalScheduling;
     private boolean insertOrdered;
     private Duration dynamicFilteringWaitTimeout = new Duration(5, SECONDS);
@@ -258,6 +259,19 @@ public class MongoClientConfig
     public MongoClientConfig setProjectionPushdownEnabled(boolean projectionPushDownEnabled)
     {
         this.projectionPushDownEnabled = projectionPushDownEnabled;
+        return this;
+    }
+
+    public boolean isAggregationPushdownEnabled()
+    {
+        return aggregationPushdownEnabled;
+    }
+
+    @Config("mongodb.aggregation-pushdown.enabled")
+    @ConfigDescription("Enable aggregation pushdown")
+    public MongoClientConfig setAggregationPushdownEnabled(boolean aggregationPushdownEnabled)
+    {
+        this.aggregationPushdownEnabled = aggregationPushdownEnabled;
         return this;
     }
 
