@@ -14,8 +14,10 @@
     - Subject Syntax: Must begin with a capital letter (or subsystem prefix like `Component: ...`) and must NEVER end with a period (`.`).
     - Imperative Mood: Must use imperative verbs (`Add`, `Fix`, `Update`, `Remove`), never past-tense (`Added`, `Fixed`, `Updated`).
     - Body Formatting: Blank line separating subject and body. All body lines strictly wrapped at <= 72 characters explaining the motivation and behavioral change.
-  - PR Description Contract: PR descriptions must adhere to `.github/pull_request_template.md`.
+  - PR Description Contract: PR descriptions must adhere to `.github/pull_request_template.md`. Issue-closing references (e.g., `fixes #123`, `closes #123`) MUST be on bulleted list items starting with `- ` or `* ` (never embedded in paragraph prose) to ensure rich link preview rendering.
+  - File Trailing Newline Invariant: Every text file (Java, XML, YAML, Markdown, scripts) must terminate with a newline character (`\n`). Upstream CI scans all files via `git grep` and fails on missing trailing newlines.
   - Plan-vs-Diff Containment: Strict plan containment. Zero opportunistic cleanup, unrelated reformatting, or out-of-scope edits.
+  - Human Author Voice Mandate: All PR notes, descriptions, and commit explanations must sound like an experienced human engineer who contributes regularly. Zero AI tells: no em-dashes, no emojis, no verbose or dense phrasing, and no restating obvious engine mechanics that any reviewer already understands. Keep the cadence crisp, technical, and directly focused on the change.
 
 ## 2. Toolchain & Boundary Invariants
 - **Primary Languages & Extensions**: Java 25 (source files: `*.java`), TypeScript/TSX for Web UI (`core/trino-web-ui`).
