@@ -30,6 +30,9 @@ import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.mongodb.DBRef;
 import com.mongodb.MongoCommandException;
 import com.mongodb.MongoNamespace;
+import com.mongodb.MongoServerUnavailableException;
+import com.mongodb.MongoSocketException;
+import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoCollection;
@@ -64,6 +67,9 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
+import org.bson.BsonDocument;
+import org.bson.BsonInt32;
+import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.types.Binary;
 import org.bson.types.Decimal128;
@@ -507,6 +513,73 @@ public class MongoSession
     public MongoCollection<Document> getCollection(RemoteTableName remoteTableName)
     {
         return getClient().getDatabase(remoteTableName.databaseName()).getCollection(remoteTableName.collectionName());
+    }
+
+    public <T> MongoCollection<T> getCollection(RemoteTableName remoteTableName, Class<T> clazz)
+    {
+        return getClient().getDatabase(remoteTableName.databaseName()).getCollection(remoteTableName.collectionName(), clazz);
+    }
+
+    public boolean isView(RemoteTableName remoteTableName)
+    {
+        return isView(remoteTableName.databaseName(), remoteTableName.collectionName());
+    }
+
+    public long getEstimatedDocumentCount(RemoteTableName remoteTableName)
+    {
+        return getCollection(remoteTableName).estimatedDocumentCount();
+    }
+
+    public long getCollectionSize(RemoteTableName remoteTableName)
+    {
+        try {
+            List<Document> pipeline = List.of(new Document("$collStats", new Document("storageStats", new Document())));
+            Document collStatsDoc = getCollection(remoteTableName).aggregate(pipeline).first();
+            if (collStatsDoc != null) {
+                Document storageStats = collStatsDoc.get("storageStats", Document.class);
+                if (storageStats != null && storageStats.get("size") instanceof Number num) {
+                    return num.longValue();
+                }
+            }
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to get collection size via $collStats for %s", remoteTableName);
+        }
+
+        try {
+            Document command = new Document("collStats", remoteTableName.collectionName());
+            Document result = getClient().getDatabase(remoteTableName.databaseName()).runCommand(command);
+            if (result.get("size") instanceof Number num) {
+                return num.longValue();
+            }
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to get collection size via collStats command for %s", remoteTableName);
+        }
+
+        return 0L;
+    }
+
+    public List<BsonValue> samplePartitionKeys(RemoteTableName remoteTableName, String partitionKey, int sampleSize)
+    {
+        List<BsonDocument> pipeline = List.of(
+                new BsonDocument("$sample", new BsonDocument("size", new BsonInt32(sampleSize))),
+                new BsonDocument("$project", new BsonDocument(partitionKey, new BsonInt32(1))));
+
+        try (MongoCursor<BsonDocument> cursor = getCollection(remoteTableName, BsonDocument.class).aggregate(pipeline).iterator()) {
+            ImmutableList.Builder<BsonValue> builder = ImmutableList.builder();
+            while (cursor.hasNext()) {
+                BsonDocument doc = cursor.next();
+                BsonValue val = doc.get(partitionKey);
+                if (val != null && !val.isNull()) {
+                    builder.add(val);
+                }
+            }
+            return builder.build();
+        }
+        catch (MongoTimeoutException | MongoSocketException | MongoServerUnavailableException e) {
+            throw new TrinoException(MONGODB_CLUSTER_ERROR, "Failed to sample partition keys for " + remoteTableName, e);
+        }
     }
 
     public List<MongoIndex> getIndexes(String schemaName, String tableName)
