@@ -14,10 +14,8 @@
     - Subject Syntax: Must begin with a capital letter (or subsystem prefix like `Component: ...`) and must NEVER end with a period (`.`).
     - Imperative Mood: Must use imperative verbs (`Add`, `Fix`, `Update`, `Remove`), never past-tense (`Added`, `Fixed`, `Updated`).
     - Body Formatting: Blank line separating subject and body. All body lines strictly wrapped at <= 72 characters explaining the motivation and behavioral change.
-  - PR Description Contract: PR descriptions must adhere to `.github/pull_request_template.md`. Issue-closing references (e.g., `fixes #123`, `closes #123`) MUST be on bulleted list items starting with `- ` or `* ` (never embedded in paragraph prose) to ensure rich link preview rendering.
-  - File Trailing Newline Invariant: Every text file (Java, XML, YAML, Markdown, scripts) must terminate with a newline character (`\n`). Upstream CI scans all files via `git grep` and fails on missing trailing newlines.
+  - PR Description Contract: PR descriptions must adhere to `.github/pull_request_template.md`.
   - Plan-vs-Diff Containment: Strict plan containment. Zero opportunistic cleanup, unrelated reformatting, or out-of-scope edits.
-  - Human Author Voice Mandate: All PR notes, descriptions, and commit explanations must sound like an experienced human engineer who contributes regularly. Zero AI tells: no em-dashes, no emojis, no verbose or dense phrasing, and no restating obvious engine mechanics that any reviewer already understands. Keep the cadence crisp, technical, and directly focused on the change.
 
 ## 2. Toolchain & Boundary Invariants
 - **Primary Languages & Extensions**: Java 25 (source files: `*.java`), TypeScript/TSX for Web UI (`core/trino-web-ui`).
@@ -31,20 +29,9 @@
 ## 3. Verification & Test Harness Contract
 - **Modular Scoping Invariant**: Never run root `./mvnw test` without module scoping (`-pl <module>`), as full repository test suites take 30–60+ minutes. All test and compile commands must be scoped to the touched module.
 - **Inter-Module Dependency Invariant**: When targeting submodules in the reactor, always pass `-am` (`--also-make`) so reactor SNAPSHOT dependencies are compiled locally instead of failing on remote lookup.
-- **Fast Local Validation Contract (< 2 min)**:
-  - Trailing newline check: Verify all git-modified text files end with `\n` (ignoring deleted paths).
-  - Airlift commit message compliance: Validate commit subject and body structure.
-  - PR description structural rules: Capital letter start, issue-closing directives on `- ` or `* ` bullets.
-  - Airstyle verification: `./mvnw airstyle:check -pl <module>`
-  - Airstyle auto-format: `./mvnw airstyle:format -pl <module> -Dincludes=**/<FileName>.java`
-  - License header check: `./mvnw license:check -pl <module>`
-  - POM formatting check: `./mvnw sortpom:verify -pl <module>`
-  - Static analysis & Error Prone: `./mvnw clean test-compile -Dair.check.skip-all=true -P errorprone-compiler -pl <module> -am`
-  - Scoped in-memory unit tests: Pure Java unit tests scoped by concrete class name (`./mvnw test -Dair.check.skip-all=true -pl <module> -am -Dtest=<TestClass>`), explicitly excluding Testcontainers/Docker integration tests.
-  - Frontend Web UI verification: `bun run verify` (in `core/trino-web-ui/src/main/resources/webapp` when UI is modified)
-- **CI-Exclusive Test Boundaries**: Full reactor builds, full unscoped module tests (`./mvnw test -pl <module>`), full reactor verification profiles (`./mvnw verify -DskipTests -P ci -pl <module> -am`), Docker Testcontainers suites, Product Test Launcher (PTL) suites, and multi-JDK matrix tests belong exclusively to GitHub Actions CI and are strictly prohibited in local validation runs.
 - **Test Isolation & Sandbox Requirements**: Write deterministic tests with hand-crafted mocks; use AssertJ for complex assertions and Airlift `Assertions` where applicable.
-- **Pass Criteria**: Zero compilation errors, zero test regressions, clean airstyle/checkstyle checks, clean working tree.
+- **Validation Contract**: Pre-PR verification and quality gating are executed exclusively via `.archon/workflows/dark/dark-validate.yaml`. Heavy multi-module integration tests, Docker Testcontainers, Product Tests, and multi-JDK matrices run exclusively in GitHub Actions CI.
+- **Pass Criteria**: Zero compilation errors, zero test regressions, clean working tree.
 
 ## 4. Code Style & Design Invariants
 - **Typing Discipline**: Strict Java 25 static typing. Use `var` only when the explicit type is obvious from a constructor initializer; avoid `var` when inferred types obscure clarity. Annotate SQL and regex parameters with `@org.intellij.lang.annotations.Language`.
