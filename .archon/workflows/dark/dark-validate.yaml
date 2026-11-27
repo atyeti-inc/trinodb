@@ -18,6 +18,14 @@ nodes:
       set -eo pipefail
 
       TARGET_BRANCH="$INPUTS.target_branch"
+      if [ -z "$TARGET_BRANCH" ] || [ "$TARGET_BRANCH" = "master" ]; then
+        if command -v gh >/dev/null 2>&1; then
+          DETECTED_BASE=$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null || true)
+          if [ -n "$DETECTED_BASE" ]; then
+            TARGET_BRANCH="$DETECTED_BASE"
+          fi
+        fi
+      fi
       TARGET_BRANCH="${TARGET_BRANCH:-master}"
       SCOPE="$INPUTS.scope"
       SCOPE="${SCOPE:-}"
