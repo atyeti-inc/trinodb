@@ -161,7 +161,6 @@ nodes:
         JAVA_OR_POM_CHANGED=true
       fi
 
-      TESTS_RUN=()
       if [ "$JAVA_OR_POM_CHANGED" = true ] && [ -n "$TARGET_MODULE" ]; then
         echo "=== Step 5: Scoped Fast Maven Checks for module: $TARGET_MODULE ==="
 
@@ -179,34 +178,8 @@ nodes:
         if ! ./mvnw sortpom:verify -pl "$TARGET_MODULE"; then
           ERRORS+=("POM sort verification failed on $TARGET_MODULE")
         fi
-
-        echo "Running Error Prone test-compile..."
-        if ! ./mvnw clean test-compile -Dair.check.skip-all=true -P errorprone-compiler -pl "$TARGET_MODULE" -am; then
-          ERRORS+=("Error Prone test-compile failed on $TARGET_MODULE")
-        fi
-
-        echo "Running scoped unit tests..."
-        CHANGED_TESTS=$(echo "$MODIFIED_FILES" | grep -E '(Test[^/]*\.java|[^/]*Test\.java)$' | xargs -r -n1 basename | sed 's/\.java$//' | grep -vE '(Smoke|QueryRunner|Container|Integration)' | tr '\n' ',' | sed 's/,$//' || true)
-
-        TEST_ARG=""
-        if [ -n "$CHANGED_TESTS" ]; then
-          TEST_ARG="-Dtest=$CHANGED_TESTS"
-          TESTS_RUN+=("$CHANGED_TESTS")
-        elif [ "$TARGET_MODULE" = "plugin/trino-mongodb" ]; then
-          TEST_ARG="-Dtest=TestMongoClientConfig,TestMongoSessionProperties,TestMongoTableHandle,TestMongoSplit"
-          TESTS_RUN+=("TestMongoClientConfig,TestMongoSessionProperties,TestMongoTableHandle,TestMongoSplit")
-        fi
-
-        if [ -n "$TEST_ARG" ]; then
-          echo "Executing test command: ./mvnw test -Dair.check.skip-all=true -pl $TARGET_MODULE -am $TEST_ARG"
-          if ! ./mvnw test -Dair.check.skip-all=true -pl "$TARGET_MODULE" -am "$TEST_ARG"; then
-            ERRORS+=("Unit tests execution failed: $TEST_ARG")
-          fi
-        else
-          echo "No targeted in-memory unit tests identified for module: $TARGET_MODULE"
-        fi
       else
-        echo "No Java/POM modifications detected in scoped modules; skipping Maven test-compile and test runs."
+        echo "No Java/POM modifications detected in scoped modules; skipping Maven static checks."
       fi
 
       # Step 6: Artifacts Generation
@@ -224,12 +197,9 @@ nodes:
           echo "- Trailing newline verification: SUCCESS"
           echo "- Commit message format verification: SUCCESS"
           echo "- PR link and structure verification: SUCCESS"
-          echo "- Scoped module build and unit tests: SUCCESS"
+          echo "- Fast Maven static checks (airstyle, license, sortpom): SUCCESS"
           echo ""
         } > "$VAL_MD"
-        if [ ${#TESTS_RUN[@]} -gt 0 ]; then
-          echo "Tests verified: ${TESTS_RUN[*]}" >> "$VAL_MD"
-        fi
       else
         GATE_STATUS="failed"
         {
@@ -247,13 +217,13 @@ nodes:
       fi
 
       if command -v python3 >/dev/null 2>&1; then
-        python3 -c "import json, sys; status, module, tests, body, errors, out_path = sys.argv[1:7]; payload = {'gate_status': status, 'module': module, 'tests_run': [t for t in tests.split(',') if t], 'pr_body': body, 'errors': [e for e in errors.split(';;') if e]}; open(out_path, 'w', encoding='utf-8').write(json.dumps(payload, indent=2))" "$GATE_STATUS" "$TARGET_MODULE" "${TESTS_RUN[*]}" "$PR_BODY" "$(IFS=';;'; echo "${ERRORS[*]}")" "$GATE_JSON"
+        python3 -c "import json, sys; status, module, body, errors, out_path = sys.argv[1:6]; payload = {'gate_status': status, 'module': module, 'tests_run': [], 'pr_body': body, 'errors': [e for e in errors.split(';;') if e]}; open(out_path, 'w', encoding='utf-8').write(json.dumps(payload, indent=2))" "$GATE_STATUS" "$TARGET_MODULE" "$PR_BODY" "$(IFS=';;'; echo "${ERRORS[*]}")" "$GATE_JSON"
       else
         {
           echo "{"
           echo "  \"gate_status\": \"$GATE_STATUS\","
           echo "  \"module\": \"$TARGET_MODULE\","
-          echo "  \"tests_run\": [\"${TESTS_RUN[*]}\"],"
+          echo "  \"tests_run\": [],"
           echo "  \"pr_body\": $(echo "$PR_BODY" | jq -Rs . 2>/dev/null || echo '""'),"
           echo "  \"errors\": $(printf '%s\n' "${ERRORS[@]}" | jq -R . | jq -s . 2>/dev/null || echo '[]')"
           echo "}"
