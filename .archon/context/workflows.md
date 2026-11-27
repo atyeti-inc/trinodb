@@ -32,8 +32,6 @@
 - **Modular Scoping Invariant**: Never run root `./mvnw test` without module scoping (`-pl <module>`), as full repository test suites take 30–60+ minutes. All test and compile commands must be scoped to the touched module.
 - **Inter-Module Dependency Invariant**: When targeting submodules in the reactor, always pass `-am` (`--also-make`) so reactor SNAPSHOT dependencies are compiled locally instead of failing on remote lookup.
 - **Test Isolation & Sandbox Requirements**: Write deterministic tests with hand-crafted mocks; use AssertJ for complex assertions and Airlift `Assertions` where applicable.
-- **Validation Contract**: Pre-PR verification and quality gating are executed exclusively via `.archon/workflows/dark/dark-validate.yaml`. Heavy multi-module integration tests, Docker Testcontainers, Product Tests, and multi-JDK matrices run exclusively in GitHub Actions CI.
-- **Pass Criteria**: Zero compilation errors, zero test regressions, clean working tree.
 
 ## 4. Code Style & Design Invariants
 - **Typing Discipline**: Strict Java 25 static typing. Use `var` only when the explicit type is obvious from a constructor initializer; avoid `var` when inferred types obscure clarity. Annotate SQL and regex parameters with `@org.intellij.lang.annotations.Language`.
