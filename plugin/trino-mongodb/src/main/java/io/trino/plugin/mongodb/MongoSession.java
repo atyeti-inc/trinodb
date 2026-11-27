@@ -64,6 +64,9 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
+import org.bson.BsonDocument;
+import org.bson.BsonInt32;
+import org.bson.BsonValue;
 import org.bson.Document;
 import org.bson.types.Binary;
 import org.bson.types.Decimal128;
@@ -1101,7 +1104,12 @@ public class MongoSession
                 .collect(toImmutableList());
     }
 
-    private boolean isView(String schemaName, String tableName)
+    public boolean isView(RemoteTableName remoteTableName)
+    {
+        return isView(remoteTableName.databaseName(), remoteTableName.collectionName());
+    }
+
+    public boolean isView(String schemaName, String tableName)
     {
         Document listCollectionsCommand = new Document(ImmutableMap.<String, Object>builder()
                 .put("listCollections", 1.0)
@@ -1116,6 +1124,76 @@ public class MongoSession
         }
         String type = firstBatch.get(0).getString("type");
         return "view".equals(type);
+    }
+
+    public long getEstimatedDocumentCount(RemoteTableName remoteTableName)
+    {
+        return getCollection(remoteTableName).estimatedDocumentCount();
+    }
+
+    public long getCollectionSize(RemoteTableName remoteTableName)
+    {
+        try {
+            Document stats = getCollection(remoteTableName)
+                    .aggregate(List.of(new Document("$collStats", new Document("storageStats", new Document()))))
+                    .first();
+            if (stats != null && stats.containsKey("storageStats")) {
+                Document storageStats = stats.get("storageStats", Document.class);
+                if (storageStats != null && storageStats.containsKey("size")) {
+                    Number size = (Number) storageStats.get("size");
+                    return size.longValue();
+                }
+            }
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to get collection size via $collStats for %s", remoteTableName);
+        }
+
+        try {
+            Document stats = getClient().getDatabase(remoteTableName.databaseName())
+                    .runCommand(new Document("collStats", remoteTableName.collectionName()));
+            if (stats.containsKey("size")) {
+                Number size = (Number) stats.get("size");
+                return size.longValue();
+            }
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to get collection size via collStats command for %s", remoteTableName);
+        }
+
+        return 0L;
+    }
+
+    public List<BsonValue> samplePartitionKeys(RemoteTableName remoteTableName, String partitionKey, int sampleSize)
+    {
+        List<BsonDocument> pipeline = List.of(
+                new BsonDocument("$sample", new BsonDocument("size", new BsonInt32(sampleSize))),
+                new BsonDocument("$project", new BsonDocument(partitionKey, new BsonInt32(1))));
+
+        List<BsonValue> sampleKeys = new ArrayList<>();
+        try {
+            MongoCursor<BsonDocument> cursor = getClient().getDatabase(remoteTableName.databaseName())
+                    .getCollection(remoteTableName.collectionName(), BsonDocument.class)
+                    .aggregate(pipeline)
+                    .iterator();
+            try (cursor) {
+                while (cursor.hasNext()) {
+                    BsonDocument doc = cursor.next();
+                    BsonValue value = doc.get(partitionKey);
+                    if (value != null && !value.isNull()) {
+                        sampleKeys.add(value);
+                    }
+                }
+            }
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (Exception e) {
+            throw new TrinoException(MONGODB_CLUSTER_ERROR, "Failed to sample partition keys from MongoDB collection: " + remoteTableName, e);
+        }
+
+        return sampleKeys;
     }
 
     private MongoClient getClient()
