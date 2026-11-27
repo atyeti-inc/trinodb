@@ -537,14 +537,27 @@ public class MongoSession
         MongoCollection<Document> collection = getCollection(tableHandle.remoteTableName());
         Document filter = buildFilter(tableHandle);
         FindIterable<Document> iterable = collection.find(filter).projection(projection).collation(SIMPLE_COLLATION);
+        if (!tableHandle.sortOrder().isEmpty()) {
+            iterable.sort(buildSort(tableHandle.sortOrder()));
+        }
         tableHandle.limit().ifPresent(iterable::limit);
-        log.debug("Find documents: collection: %s, filter: %s, projection: %s", tableHandle.schemaTableName(), filter, projection);
+        log.debug("Find documents: collection: %s, filter: %s, projection: %s, sort: %s", tableHandle.schemaTableName(), filter, projection, tableHandle.sortOrder());
 
         if (cursorBatchSize != 0) {
             iterable.batchSize(cursorBatchSize);
         }
 
         return iterable.iterator();
+    }
+
+    @VisibleForTesting
+    static Document buildSort(List<MongoSortItem> sortOrder)
+    {
+        Document sortDocument = new Document();
+        for (MongoSortItem item : sortOrder) {
+            sortDocument.append(item.column().getQualifiedName(), item.sortOrder().isAscending() ? 1 : -1);
+        }
+        return sortDocument;
     }
 
     @VisibleForTesting

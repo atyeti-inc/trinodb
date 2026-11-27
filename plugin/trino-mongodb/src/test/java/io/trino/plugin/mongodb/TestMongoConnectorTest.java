@@ -28,6 +28,7 @@ import io.trino.Session;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.LimitNode;
 import io.trino.sql.planner.plan.ProjectNode;
+import io.trino.sql.planner.plan.TopNNode;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.MaterializedResult;
 import io.trino.testing.MaterializedRow;
@@ -198,7 +199,28 @@ public class TestMongoConnectorTest
         // and there's no requirement that the conform to a specific shape or contain certain keywords.
         assertExplain(
                 "EXPLAIN SELECT name FROM nation ORDER BY nationkey DESC NULLS LAST LIMIT 5",
-                "TopNPartial\\[count = 5, orderBy = \\[nationkey DESC");
+                "sortOrder=\\[(?i:nationkey):.* DESC NULLS LAST] limit=5");
+    }
+
+    @Test
+    public void testTopNPushdownQueries()
+    {
+        assertThat(query("SELECT name FROM nation ORDER BY nationkey DESC NULLS LAST LIMIT 5"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT name FROM nation ORDER BY nationkey ASC NULLS FIRST LIMIT 5"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT nationkey, name FROM nation ORDER BY regionkey DESC NULLS LAST, nationkey ASC NULLS FIRST LIMIT 5"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT name FROM nation WHERE regionkey = 1 ORDER BY nationkey DESC NULLS LAST LIMIT 3"))
+                .isFullyPushedDown();
+        assertThat(query("SELECT name FROM nation ORDER BY nationkey ASC LIMIT 5"))
+                .isNotFullyPushedDown(TopNNode.class);
+
+        assertQueryOrdered("SELECT name FROM nation ORDER BY nationkey DESC NULLS LAST LIMIT 5");
+        assertQueryOrdered("SELECT name FROM nation ORDER BY nationkey ASC NULLS FIRST LIMIT 5");
+        assertQueryOrdered("SELECT nationkey, name FROM nation ORDER BY regionkey DESC NULLS LAST, nationkey ASC NULLS FIRST LIMIT 5");
+        assertQueryOrdered("SELECT name FROM nation WHERE regionkey = 1 ORDER BY nationkey DESC NULLS LAST LIMIT 3");
+        assertQueryOrdered("SELECT name FROM nation ORDER BY nationkey ASC LIMIT 5");
     }
 
     @Test

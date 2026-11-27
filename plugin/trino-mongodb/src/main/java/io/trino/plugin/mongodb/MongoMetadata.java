@@ -51,9 +51,12 @@ import io.trino.spi.connector.RetryMode;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.SortItem;
+import io.trino.spi.connector.SortOrder;
 import io.trino.spi.connector.SortingProperty;
 import io.trino.spi.connector.TableFunctionApplicationResult;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.Variable;
@@ -625,9 +628,59 @@ public class MongoMetadata
                         handle.filter(),
                         handle.constraint(),
                         handle.projectedColumns(),
+                        handle.sortOrder(),
                         OptionalInt.of(toIntExact(limit))),
                 true,
                 false));
+    }
+
+    @Override
+    public Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            long topNCount,
+            List<SortItem> sortItems,
+            Map<String, ColumnHandle> assignments)
+    {
+        MongoTableHandle handle = (MongoTableHandle) table;
+
+        if (topNCount <= 0 || topNCount > Integer.MAX_VALUE) {
+            return Optional.empty();
+        }
+
+        if (handle.limit().isPresent() || !handle.sortOrder().isEmpty()) {
+            return Optional.empty();
+        }
+
+        if (sortItems.isEmpty() || sortItems.size() > 32) {
+            return Optional.empty();
+        }
+
+        ImmutableList.Builder<MongoSortItem> sortOrder = ImmutableList.builder();
+        for (SortItem sortItem : sortItems) {
+            SortOrder order = sortItem.getSortOrder();
+            if (order != SortOrder.ASC_NULLS_FIRST && order != SortOrder.DESC_NULLS_LAST) {
+                return Optional.empty();
+            }
+
+            ColumnHandle columnHandle = assignments.get(sortItem.getName());
+            if (!(columnHandle instanceof MongoColumnHandle mongoColumnHandle)) {
+                return Optional.empty();
+            }
+
+            sortOrder.add(new MongoSortItem(mongoColumnHandle, order));
+        }
+
+        MongoTableHandle newTableHandle = new MongoTableHandle(
+                handle.schemaTableName(),
+                handle.remoteTableName(),
+                handle.filter(),
+                handle.constraint(),
+                handle.projectedColumns(),
+                sortOrder.build(),
+                OptionalInt.of(toIntExact(topNCount)));
+
+        return Optional.of(new TopNApplicationResult<>(newTableHandle, true, false));
     }
 
     @Override
@@ -672,6 +725,7 @@ public class MongoMetadata
                 handle.filter(),
                 newDomain,
                 handle.projectedColumns(),
+                handle.sortOrder(),
                 handle.limit());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, remainingFilter, constraint.getExpression(), false));

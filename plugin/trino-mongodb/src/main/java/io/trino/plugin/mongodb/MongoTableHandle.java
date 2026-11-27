@@ -13,12 +13,14 @@
  */
 package io.trino.plugin.mongodb;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.TupleDomain;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -32,12 +34,13 @@ public record MongoTableHandle(
         Optional<String> filter,
         TupleDomain<ColumnHandle> constraint,
         Set<MongoColumnHandle> projectedColumns,
+        List<MongoSortItem> sortOrder,
         OptionalInt limit)
         implements ConnectorTableHandle
 {
     public MongoTableHandle(SchemaTableName schemaTableName, RemoteTableName remoteTableName, Optional<String> filter)
     {
-        this(schemaTableName, remoteTableName, filter, TupleDomain.all(), ImmutableSet.of(), OptionalInt.empty());
+        this(schemaTableName, remoteTableName, filter, TupleDomain.all(), ImmutableSet.of(), ImmutableList.of(), OptionalInt.empty());
     }
 
     public MongoTableHandle
@@ -47,6 +50,7 @@ public record MongoTableHandle(
         requireNonNull(filter, "filter is null");
         requireNonNull(constraint, "constraint is null");
         projectedColumns = ImmutableSet.copyOf(requireNonNull(projectedColumns, "projectedColumns is null"));
+        sortOrder = ImmutableList.copyOf(requireNonNull(sortOrder, "sortOrder is null"));
         requireNonNull(limit, "limit is null");
     }
 
@@ -68,6 +72,9 @@ public record MongoTableHandle(
         if (!projectedColumns.isEmpty()) {
             builder.append(" columns=").append(projectedColumns);
         }
+        if (!sortOrder.isEmpty()) {
+            builder.append(" sortOrder=").append(sortOrder);
+        }
         limit.ifPresent(value -> builder.append(" limit=").append(value));
         return builder.toString();
     }
@@ -80,6 +87,7 @@ public record MongoTableHandle(
                 filter,
                 constraint,
                 projectedColumns,
+                sortOrder,
                 limit);
     }
 
@@ -91,6 +99,7 @@ public record MongoTableHandle(
                 filter,
                 constraint,
                 projectedColumns,
+                sortOrder,
                 limit);
     }
 }
