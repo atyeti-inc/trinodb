@@ -36,9 +36,11 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.MongoIterable;
+import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Collation;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.IndexOptions;
+import com.mongodb.client.model.Projections;
 import com.mongodb.client.model.Updates;
 import com.mongodb.client.result.DeleteResult;
 import io.airlift.log.Logger;
@@ -64,7 +66,10 @@ import io.trino.spi.type.RowType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.VarcharType;
+import org.bson.BsonDocument;
+import org.bson.BsonValue;
 import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.bson.types.Binary;
 import org.bson.types.Decimal128;
 import org.bson.types.ObjectId;
@@ -509,6 +514,16 @@ public class MongoSession
         return getClient().getDatabase(remoteTableName.databaseName()).getCollection(remoteTableName.collectionName());
     }
 
+    public boolean isView(RemoteTableName remoteTableName)
+    {
+        return isView(remoteTableName.databaseName(), remoteTableName.collectionName());
+    }
+
+    public List<MongoIndex> getIndexes(RemoteTableName remoteTableName)
+    {
+        return getIndexes(remoteTableName.databaseName(), remoteTableName.collectionName());
+    }
+
     public List<MongoIndex> getIndexes(String schemaName, String tableName)
     {
         if (isView(schemaName, tableName)) {
@@ -516,6 +531,46 @@ public class MongoSession
         }
         MongoCollection<Document> collection = getClient().getDatabase(schemaName).getCollection(tableName);
         return MongoIndex.parse(collection.listIndexes());
+    }
+
+    public long getEstimatedDocumentCount(RemoteTableName remoteTableName)
+    {
+        return getCollection(remoteTableName).estimatedDocumentCount();
+    }
+
+    public long getCollectionSizeBytes(RemoteTableName remoteTableName)
+    {
+        try {
+            Document collStats = getClient().getDatabase(remoteTableName.databaseName())
+                    .runCommand(new Document("collStats", remoteTableName.collectionName()));
+            Object size = collStats.get("size");
+            if (size instanceof Number number) {
+                return number.longValue();
+            }
+        }
+        catch (Exception e) {
+            log.debug("Failed to retrieve collection size for %s: %s", remoteTableName, e.getMessage());
+        }
+        return 0;
+    }
+
+    public List<BsonValue> samplePartitionKeys(RemoteTableName remoteTableName, String partitionKey, int sampleSize)
+    {
+        List<Bson> pipeline = List.of(
+                Aggregates.sample(sampleSize),
+                Aggregates.project(Projections.fields(
+                        partitionKey.equals("_id")
+                                ? Projections.include("_id")
+                                : Projections.fields(Projections.include(partitionKey), Projections.excludeId()))));
+
+        ImmutableList.Builder<BsonValue> sampledKeys = ImmutableList.builder();
+        for (BsonDocument doc : getCollection(remoteTableName).withDocumentClass(BsonDocument.class).aggregate(pipeline)) {
+            BsonValue value = doc.get(partitionKey);
+            if (value != null && !value.isNull()) {
+                sampledKeys.add(value);
+            }
+        }
+        return sampledKeys.build();
     }
 
     public long deleteDocuments(RemoteTableName remoteTableName, TupleDomain<ColumnHandle> constraint)
