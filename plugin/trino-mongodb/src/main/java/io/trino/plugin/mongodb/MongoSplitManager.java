@@ -14,6 +14,7 @@
 package io.trino.plugin.mongodb;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import com.mongodb.MongoServerUnavailableException;
 import com.mongodb.MongoSocketException;
@@ -38,6 +39,7 @@ import org.bson.BsonValue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -94,38 +96,159 @@ public class MongoSplitManager
             return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
         }
 
-        return getParallelSplits(transaction, session, table, dynamicFilterColumns, constraint, dynamicFilteringWaitTimeoutMillis);
-    }
-
-    protected ConnectorSplitSource getParallelSplits(
-            ConnectorTransactionHandle transaction,
-            ConnectorSession session,
-            ConnectorTableHandle table,
-            Set<ColumnHandle> dynamicFilterColumns,
-            Constraint constraint,
-            long dynamicFilteringWaitTimeoutMillis)
-    {
         if (mongoSession == null) {
             return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
         }
 
-        MongoTableHandle tableHandle = (MongoTableHandle) table;
         RemoteTableName remoteTableName = tableHandle.remoteTableName();
-        MongoSplitStrategy splitStrategy = getSplitStrategy(session);
-
-        if (splitStrategy == MongoSplitStrategy.CHUNK) {
+        if (mongoSession.isView(remoteTableName)) {
             return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
         }
 
+        MongoSplitStrategy splitStrategy = getSplitStrategy(session);
+        return switch (splitStrategy) {
+            case CHUNK -> generateChunkSplits(tableHandle, dynamicFilteringWaitTimeoutMillis);
+            case RANGE -> generateRangeSplits(session, tableHandle, dynamicFilteringWaitTimeoutMillis);
+            case AUTOMATIC -> generateAutomaticSplits(session, tableHandle, dynamicFilteringWaitTimeoutMillis);
+        };
+    }
+
+    private MongoSplitSource generateChunkSplits(MongoTableHandle tableHandle, long dynamicFilteringWaitTimeoutMillis)
+    {
+        RemoteTableName remoteTableName = tableHandle.remoteTableName();
         try {
-            if (mongoSession.isView(remoteTableName)) {
-                return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
+            Optional<MongoShardedCollectionMetadata> metadataOptional = mongoSession.getShardedCollectionMetadata(remoteTableName);
+            if (metadataOptional.isEmpty()) {
+                throw new TrinoException(NOT_SUPPORTED, "Table '%s' is not sharded".formatted(tableHandle.schemaTableName()));
             }
 
+            MongoShardedCollectionMetadata metadata = metadataOptional.get();
+            if (metadata.hasHashedShardKey()) {
+                throw new TrinoException(NOT_SUPPORTED, "Table '%s' has a hashed shard key which does not support chunk-based split generation".formatted(tableHandle.schemaTableName()));
+            }
+
+            List<MongoChunk> chunks = mongoSession.getChunks(remoteTableName, metadata);
+            if (chunks.isEmpty()) {
+                throw new TrinoException(MONGODB_CLUSTER_ERROR, "No chunks found for sharded table: " + tableHandle.schemaTableName());
+            }
+
+            Map<String, List<HostAddress>> shardAddresses;
+            try {
+                shardAddresses = mongoSession.getShardAddresses();
+            }
+            catch (Exception e) {
+                log.warn(e, "Failed to retrieve shard addresses; falling back to coordinator server address");
+                shardAddresses = ImmutableMap.of();
+            }
+
+            List<ConnectorSplit> splits = buildChunkSplits(metadata.shardKeyFields(), chunks, shardAddresses);
+            return new MongoSplitSource(dynamicFilteringWaitTimeoutMillis, new FixedSplitSource(splits));
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (MongoTimeoutException | MongoSocketException | MongoServerUnavailableException e) {
+            throw new TrinoException(MONGODB_CLUSTER_ERROR, "Failed to communicate with MongoDB during split generation", e);
+        }
+        catch (Exception e) {
+            throw new TrinoException(MONGODB_CLUSTER_ERROR, "Failed to generate chunk splits for table: " + tableHandle.schemaTableName(), e);
+        }
+    }
+
+    private MongoSplitSource generateAutomaticSplits(
+            ConnectorSession session,
+            MongoTableHandle tableHandle,
+            long dynamicFilteringWaitTimeoutMillis)
+    {
+        RemoteTableName remoteTableName = tableHandle.remoteTableName();
+        Optional<MongoShardedCollectionMetadata> metadataOptional = Optional.empty();
+        try {
+            metadataOptional = mongoSession.getShardedCollectionMetadata(remoteTableName);
+        }
+        catch (Exception e) {
+            log.debug(e, "Failed to retrieve sharded collection metadata for %s in automatic split mode; falling back to range splitting", remoteTableName);
+        }
+
+        if (metadataOptional.isPresent() && !metadataOptional.get().hasHashedShardKey()) {
+            try {
+                MongoShardedCollectionMetadata metadata = metadataOptional.get();
+                List<MongoChunk> chunks = mongoSession.getChunks(remoteTableName, metadata);
+                if (chunks.size() > 1) {
+                    long estimatedDocCount = mongoSession.getEstimatedDocumentCount(remoteTableName);
+                    long minRecordsPerSplit = getMinRecordsPerSplit(session);
+                    if (estimatedDocCount == 0 || (minRecordsPerSplit > 0 && estimatedDocCount < minRecordsPerSplit)) {
+                        return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
+                    }
+
+                    Map<String, List<HostAddress>> shardAddresses;
+                    try {
+                        shardAddresses = mongoSession.getShardAddresses();
+                    }
+                    catch (Exception e) {
+                        log.debug(e, "Failed to retrieve shard addresses in automatic split mode; falling back to coordinator server address");
+                        shardAddresses = ImmutableMap.of();
+                    }
+
+                    List<ConnectorSplit> splits = buildChunkSplits(metadata.shardKeyFields(), chunks, shardAddresses);
+                    return new MongoSplitSource(dynamicFilteringWaitTimeoutMillis, new FixedSplitSource(splits));
+                }
+            }
+            catch (Exception e) {
+                log.debug(e, "Failed to generate chunk splits for %s in automatic split mode; falling back to range splitting", remoteTableName);
+            }
+        }
+
+        return tryGenerateRangeSplits(session, tableHandle, dynamicFilteringWaitTimeoutMillis);
+    }
+
+    private List<ConnectorSplit> buildChunkSplits(
+            List<String> shardKeyFields,
+            List<MongoChunk> chunks,
+            Map<String, List<HostAddress>> shardAddresses)
+    {
+        ImmutableList.Builder<ConnectorSplit> splits = ImmutableList.builder();
+        List<HostAddress> fallbackAddresses = serverDetailsProvider.getServerAddress();
+
+        for (MongoChunk chunk : chunks) {
+            List<HostAddress> addresses = shardAddresses.getOrDefault(chunk.shardId(), fallbackAddresses);
+            if (addresses.isEmpty()) {
+                addresses = fallbackAddresses;
+            }
+
+            MongoPartitionBounds bounds = MongoPartitionBounds.fromBson(
+                    shardKeyFields,
+                    chunk.min(),
+                    true,
+                    chunk.max(),
+                    false);
+
+            splits.add(new MongoSplit(addresses, Optional.of(bounds)));
+        }
+        return splits.build();
+    }
+
+    private MongoSplitSource generateRangeSplits(ConnectorSession session, MongoTableHandle tableHandle, long dynamicFilteringWaitTimeoutMillis)
+    {
+        return generateRangeSplitsInternal(session, tableHandle, dynamicFilteringWaitTimeoutMillis, true);
+    }
+
+    private MongoSplitSource tryGenerateRangeSplits(ConnectorSession session, MongoTableHandle tableHandle, long dynamicFilteringWaitTimeoutMillis)
+    {
+        return generateRangeSplitsInternal(session, tableHandle, dynamicFilteringWaitTimeoutMillis, false);
+    }
+
+    private MongoSplitSource generateRangeSplitsInternal(
+            ConnectorSession session,
+            MongoTableHandle tableHandle,
+            long dynamicFilteringWaitTimeoutMillis,
+            boolean failFast)
+    {
+        RemoteTableName remoteTableName = tableHandle.remoteTableName();
+        try {
             List<MongoIndex> indexes = mongoSession.getIndexes(remoteTableName.databaseName(), remoteTableName.collectionName());
             Optional<String> candidateKeyOptional = MongoCandidatePartitionKeyResolver.resolveKey(indexes);
             if (candidateKeyOptional.isEmpty()) {
-                if (splitStrategy == MongoSplitStrategy.RANGE) {
+                if (failFast) {
                     throw new TrinoException(NOT_SUPPORTED, "Table '%s' does not have a range-scannable index for range partitioning".formatted(tableHandle.schemaTableName()));
                 }
                 return createSingleSplitSource(dynamicFilteringWaitTimeoutMillis);
@@ -221,7 +344,7 @@ public class MongoSplitManager
             throw new TrinoException(MONGODB_CLUSTER_ERROR, "Failed to communicate with MongoDB during split generation", e);
         }
         catch (Exception e) {
-            if (splitStrategy == MongoSplitStrategy.RANGE) {
+            if (failFast) {
                 throw new TrinoException(MONGODB_CLUSTER_ERROR, "Failed to generate range splits for table: " + tableHandle.schemaTableName(), e);
             }
             log.warn(e, "Failed to generate range splits for table %s; falling back to single split", tableHandle.schemaTableName());

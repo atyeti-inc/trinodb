@@ -71,6 +71,7 @@ import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonValue;
 import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.bson.types.Binary;
 import org.bson.types.Decimal128;
 import org.bson.types.ObjectId;
@@ -91,6 +92,7 @@ import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.function.Function;
 import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -189,6 +191,7 @@ public class MongoSession
     private final int cursorBatchSize;
 
     private final Cache<SchemaTableName, MongoTable> tableCache;
+    private final Cache<String, Map<String, List<HostAddress>>> shardAddressesCache;
     private final String implicitPrefix;
 
     public MongoSession(TypeManager typeManager, Supplier<MongoClient> client, MongoClientConfig config)
@@ -203,6 +206,9 @@ public class MongoSession
 
         this.tableCache = EvictableCacheBuilder.newBuilder()
                 .expireAfterWrite(1, MINUTES)  // TODO: Configure
+                .build();
+        this.shardAddressesCache = EvictableCacheBuilder.newBuilder()
+                .expireAfterWrite(1, MINUTES)
                 .build();
     }
 
@@ -589,6 +595,122 @@ public class MongoSession
         }
         MongoCollection<Document> collection = getClient().getDatabase(schemaName).getCollection(tableName);
         return MongoIndex.parse(collection.listIndexes());
+    }
+
+    public Optional<MongoShardedCollectionMetadata> getShardedCollectionMetadata(RemoteTableName remoteTableName)
+    {
+        try {
+            MongoCollection<BsonDocument> collections = getClient()
+                    .getDatabase("config")
+                    .getCollection("collections", BsonDocument.class);
+            String namespace = remoteTableName.databaseName() + "." + remoteTableName.collectionName();
+            BsonDocument doc = collections.find(Filters.eq("_id", namespace)).first();
+            if (doc == null) {
+                return Optional.empty();
+            }
+            if (doc.containsKey("dropped")) {
+                BsonValue dropped = doc.get("dropped");
+                if ((dropped.isBoolean() && dropped.asBoolean().getValue()) || (dropped.isInt32() && dropped.asInt32().getValue() != 0)) {
+                    return Optional.empty();
+                }
+            }
+            if (!doc.containsKey("key") || !doc.isDocument("key")) {
+                return Optional.empty();
+            }
+            BsonDocument shardKey = doc.getDocument("key");
+            if (shardKey.isEmpty()) {
+                return Optional.empty();
+            }
+            Optional<BsonValue> uuid = doc.containsKey("uuid") && !doc.isNull("uuid")
+                    ? Optional.of(doc.get("uuid"))
+                    : Optional.empty();
+            return Optional.of(new MongoShardedCollectionMetadata(shardKey, uuid));
+        }
+        catch (MongoTimeoutException | MongoSocketException | MongoServerUnavailableException e) {
+            throw new TrinoException(MONGODB_CLUSTER_ERROR, "Failed to read sharding metadata for " + remoteTableName, e);
+        }
+        catch (MongoCommandException e) {
+            throw e;
+        }
+    }
+
+    public List<MongoChunk> getChunks(RemoteTableName remoteTableName, MongoShardedCollectionMetadata metadata)
+    {
+        return getChunks(remoteTableName, metadata, filter -> {
+            MongoCollection<BsonDocument> chunksCollection = getClient()
+                    .getDatabase("config")
+                    .getCollection("chunks", BsonDocument.class);
+            return ImmutableList.copyOf(chunksCollection.find(filter).sort(new BsonDocument("min", new BsonInt32(1))));
+        });
+    }
+
+    @VisibleForTesting
+    static List<MongoChunk> getChunks(
+            RemoteTableName remoteTableName,
+            MongoShardedCollectionMetadata metadata,
+            Function<Bson, List<BsonDocument>> chunkFinder)
+    {
+        List<BsonDocument> chunkDocs = ImmutableList.of();
+        if (metadata.uuid().isPresent()) {
+            chunkDocs = chunkFinder.apply(Filters.eq("uuid", metadata.uuid().get()));
+        }
+        if (chunkDocs.isEmpty()) {
+            String namespace = remoteTableName.databaseName() + "." + remoteTableName.collectionName();
+            chunkDocs = chunkFinder.apply(Filters.eq("ns", namespace));
+        }
+        return chunkDocs.stream()
+                .map(doc -> new MongoChunk(
+                        doc.getDocument("min"),
+                        doc.getDocument("max"),
+                        doc.getString("shard").getValue()))
+                .collect(toImmutableList());
+    }
+
+    public Map<String, List<HostAddress>> getShardAddresses()
+    {
+        try {
+            return shardAddressesCache.get("shardAddresses", this::loadShardAddresses);
+        }
+        catch (ExecutionException | UncheckedExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause != null) {
+                throwIfInstanceOf(cause, TrinoException.class);
+                if (cause instanceof MongoCommandException) {
+                    throw new TrinoException(MONGODB_CLUSTER_ERROR, cause);
+                }
+            }
+            throw new RuntimeException(e);
+        }
+    }
+
+    private Map<String, List<HostAddress>> loadShardAddresses()
+    {
+        MongoCollection<BsonDocument> shardsCollection = getClient()
+                .getDatabase("config")
+                .getCollection("shards", BsonDocument.class);
+
+        ImmutableMap.Builder<String, List<HostAddress>> builder = ImmutableMap.builder();
+        for (BsonDocument doc : shardsCollection.find()) {
+            String shardId = doc.getString("_id").getValue();
+            String host = doc.getString("host").getValue();
+            builder.put(shardId, parseHostAddresses(host));
+        }
+        return builder.buildOrThrow();
+    }
+
+    public static List<HostAddress> parseHostAddresses(String host)
+    {
+        requireNonNull(host, "host is null");
+        int slashIndex = host.indexOf('/');
+        String hostsPart = slashIndex >= 0 ? host.substring(slashIndex + 1) : host;
+        ImmutableList.Builder<HostAddress> addresses = ImmutableList.builder();
+        for (String address : hostsPart.split(",")) {
+            String trimmed = address.trim();
+            if (!trimmed.isEmpty()) {
+                addresses.add(HostAddress.fromString(trimmed));
+            }
+        }
+        return addresses.build();
     }
 
     public long deleteDocuments(RemoteTableName remoteTableName, TupleDomain<ColumnHandle> constraint)

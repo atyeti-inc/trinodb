@@ -15,20 +15,31 @@ package io.trino.plugin.mongodb;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.mongodb.MongoClientSettings;
 import com.mongodb.MongoTimeoutException;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import io.trino.spi.HostAddress;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.Type;
+import org.bson.BsonBinary;
+import org.bson.BsonDocument;
+import org.bson.BsonInt32;
+import org.bson.BsonMaxKey;
+import org.bson.BsonMinKey;
+import org.bson.BsonString;
 import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.mongodb.MongoErrorCode.MONGODB_CLUSTER_ERROR;
@@ -361,6 +372,77 @@ public class TestMongoSession
         assertThat(filter).isEqualTo(new Document());
 
         assertThat(MongoSession.buildFilter(tableHandle)).isEqualTo(new Document());
+    }
+
+    @Test
+    public void testParseHostAddresses()
+    {
+        // Replica set with multiple hosts and prefix
+        assertThat(MongoSession.parseHostAddresses("rs0/host1:27017,host2:27018"))
+                .containsExactly(HostAddress.fromParts("host1", 27017), HostAddress.fromParts("host2", 27018));
+
+        // Standalone host without replica set name
+        assertThat(MongoSession.parseHostAddresses("host1:27017"))
+                .containsExactly(HostAddress.fromParts("host1", 27017));
+
+        // Multiple hosts without replica set name
+        assertThat(MongoSession.parseHostAddresses("host1:27017,host2:27018"))
+                .containsExactly(HostAddress.fromParts("host1", 27017), HostAddress.fromParts("host2", 27018));
+    }
+
+    @Test
+    public void testGetChunksVersionFallback()
+    {
+        RemoteTableName remoteTable = new RemoteTableName("testdb", "testcol");
+        BsonBinary uuid = new BsonBinary(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
+        MongoShardedCollectionMetadata metadataWithUuid = new MongoShardedCollectionMetadata(
+                new BsonDocument("x", new BsonInt32(1)),
+                Optional.of(uuid));
+
+        BsonDocument chunkDoc = new BsonDocument()
+                .append("min", new BsonDocument("x", new BsonMinKey()))
+                .append("max", new BsonDocument("x", new BsonMaxKey()))
+                .append("shard", new BsonString("shard01"));
+
+        // 1. MongoDB 5.0+: UUID query returns chunks
+        AtomicReference<Bson> executedFilter = new AtomicReference<>();
+        List<MongoChunk> chunks = MongoSession.getChunks(remoteTable, metadataWithUuid, filter -> {
+            executedFilter.set(filter);
+            return List.of(chunkDoc);
+        });
+        assertThat(chunks).hasSize(1);
+        assertThat(chunks.get(0).shardId()).isEqualTo("shard01");
+        BsonDocument uuidQueryDoc = executedFilter.get().toBsonDocument(BsonDocument.class, MongoClientSettings.getDefaultCodecRegistry());
+        assertThat(uuidQueryDoc.get("uuid")).isEqualTo(uuid);
+
+        // 2. MongoDB 5.0+ fallback to 4.x ns query when UUID query returns empty
+        List<Bson> executedFilters = new ArrayList<>();
+        chunks = MongoSession.getChunks(remoteTable, metadataWithUuid, filter -> {
+            executedFilters.add(filter);
+            if (executedFilters.size() == 1) {
+                return List.of(); // empty for uuid
+            }
+            return List.of(chunkDoc); // found for ns
+        });
+        assertThat(chunks).hasSize(1);
+        assertThat(executedFilters).hasSize(2);
+        BsonDocument firstFilterDoc = executedFilters.get(0).toBsonDocument(BsonDocument.class, MongoClientSettings.getDefaultCodecRegistry());
+        BsonDocument secondFilterDoc = executedFilters.get(1).toBsonDocument(BsonDocument.class, MongoClientSettings.getDefaultCodecRegistry());
+        assertThat(firstFilterDoc.get("uuid")).isEqualTo(uuid);
+        assertThat(secondFilterDoc.getString("ns").getValue()).isEqualTo("testdb.testcol");
+
+        // 3. MongoDB 4.x without UUID in metadata queries ns directly
+        MongoShardedCollectionMetadata metadataWithoutUuid = new MongoShardedCollectionMetadata(
+                new BsonDocument("x", new BsonInt32(1)),
+                Optional.empty());
+        executedFilter.set(null);
+        chunks = MongoSession.getChunks(remoteTable, metadataWithoutUuid, filter -> {
+            executedFilter.set(filter);
+            return List.of(chunkDoc);
+        });
+        assertThat(chunks).hasSize(1);
+        BsonDocument nsQueryDoc = executedFilter.get().toBsonDocument(BsonDocument.class, MongoClientSettings.getDefaultCodecRegistry());
+        assertThat(nsQueryDoc.getString("ns").getValue()).isEqualTo("testdb.testcol");
     }
 
     private static MongoColumnHandle createColumnHandle(String baseName, Type type, String... dereferenceNames)

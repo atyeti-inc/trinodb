@@ -20,30 +20,28 @@ import com.mongodb.MongoTimeoutException;
 import io.trino.plugin.mongodb.MongoIndex.MongodbIndexKey;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
-import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorSplitSource;
-import io.trino.spi.connector.ConnectorTableHandle;
-import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.DynamicFilterSnapshot;
-import io.trino.spi.connector.FixedSplitSource;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
+import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonMaxKey;
 import org.bson.BsonMinKey;
+import org.bson.BsonString;
 import org.bson.BsonValue;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -86,35 +84,34 @@ public class TestMongoSplitManager
     }
 
     @Test
-    public void testFallbackWhenParallelSplitDisabled()
+    public void testParallelSplitDisabledBypassesChunkSplits()
             throws Exception
     {
         HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
-        AtomicBoolean parallelSplitsCalled = new AtomicBoolean();
-        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address))
-        {
-            @Override
-            protected ConnectorSplitSource getParallelSplits(
-                    ConnectorTransactionHandle transaction,
-                    ConnectorSession session,
-                    ConnectorTableHandle table,
-                    Set<ColumnHandle> dynamicFilterColumns,
-                    Constraint constraint,
-                    long dynamicFilteringWaitTimeoutMillis)
-            {
-                parallelSplitsCalled.set(true);
-                return new FixedSplitSource(List.of(
-                        new MongoSplit(List.of(address)),
-                        new MongoSplit(List.of(address))));
-            }
-        };
+        HostAddress shardAddress = HostAddress.fromParts("shard-host", 27017);
+        MongoChunk chunk1 = new MongoChunk(
+                new BsonDocument("userId", new BsonMinKey()),
+                new BsonDocument("userId", new BsonInt32(100)),
+                "shard01");
+        MongoChunk chunk2 = new MongoChunk(
+                new BsonDocument("userId", new BsonInt32(100)),
+                new BsonDocument("userId", new BsonMaxKey()),
+                "shard01");
+
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadata(new MongoShardedCollectionMetadata(new BsonDocument("userId", new BsonInt32(1)), Optional.empty()))
+                .setChunks(List.of(chunk1, chunk2))
+                .setShardAddresses(ImmutableMap.of("shard01", List.of(shardAddress)))
+                .setEstimatedDocumentCount(10_000);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
 
         MongoTableHandle tableHandle = new MongoTableHandle(
                 new SchemaTableName("schema", "table"),
                 new RemoteTableName("schema", "table"),
                 Optional.empty());
 
-        // When parallel splitting is enabled (default), getParallelSplits is invoked returning multi-splits
+        // When parallel splitting is enabled (default), chunk-based multi-splits are returned
         ConnectorSession enabledSession = TestingConnectorSession.builder()
                 .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
                 .setPropertyValues(ImmutableMap.of(PARALLEL_SPLIT_ENABLED, true))
@@ -127,12 +124,10 @@ public class TestMongoSplitManager
                 Set.of(),
                 Constraint.alwaysTrue());
 
-        assertThat(parallelSplitsCalled.get()).isTrue();
         List<ConnectorSplit> enabledSplits = enabledSplitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
         assertThat(enabledSplits).hasSize(2);
 
-        // When parallel splitting is disabled, fallback routes directly to single split and bypasses getParallelSplits
-        parallelSplitsCalled.set(false);
+        // When parallel splitting is disabled, returns single split without partition bounds
         ConnectorSession disabledSession = TestingConnectorSession.builder()
                 .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
                 .setPropertyValues(ImmutableMap.of(PARALLEL_SPLIT_ENABLED, false))
@@ -145,11 +140,11 @@ public class TestMongoSplitManager
                 Set.of(),
                 Constraint.alwaysTrue());
 
-        assertThat(parallelSplitsCalled.get()).isFalse();
         List<ConnectorSplit> disabledSplits = disabledSplitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
         assertThat(disabledSplits).hasSize(1);
         MongoSplit split = (MongoSplit) disabledSplits.get(0);
         assertThat(split.getAddresses()).containsExactly(address);
+        assertThat(split.getPartitionBounds()).isEmpty();
         assertThat(disabledSplitSource.isFinished()).isTrue();
     }
 
@@ -206,6 +201,7 @@ public class TestMongoSplitManager
         assertThat(splits).isEmpty();
         assertThat(splitSource.isFinished()).isTrue();
         assertThat(mongoSession.isSampleCalled()).isFalse();
+        assertThat(mongoSession.isShardedMetadataCalled()).isFalse();
 
         // 2. Constraint summary is none
         MongoTableHandle allTableHandle = new MongoTableHandle(
@@ -224,6 +220,7 @@ public class TestMongoSplitManager
         assertThat(splitsSummaryNone).isEmpty();
         assertThat(splitSourceSummaryNone.isFinished()).isTrue();
         assertThat(mongoSession.isSampleCalled()).isFalse();
+        assertThat(mongoSession.isShardedMetadataCalled()).isFalse();
     }
 
     @Test
@@ -288,15 +285,39 @@ public class TestMongoSplitManager
         MongoSplit split = (MongoSplit) splits.get(0);
         assertThat(split.getPartitionBounds()).isEmpty();
         assertThat(mongoSession.isSampleCalled()).isFalse();
+        assertThat(mongoSession.isShardedMetadataCalled()).isFalse();
     }
 
     @Test
-    public void testFallbackOnChunkStrategy()
+    public void testChunkSplitsSingleKey()
             throws Exception
     {
-        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
-        TestingMongoSession mongoSession = new TestingMongoSession();
-        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+        HostAddress defaultAddress = HostAddress.fromParts("127.0.0.1", 27017);
+        HostAddress shard0Address = HostAddress.fromParts("shard0-host", 27017);
+        HostAddress shard1Address = HostAddress.fromParts("shard1-host", 27017);
+
+        MongoChunk chunk1 = new MongoChunk(
+                new BsonDocument("userId", new BsonMinKey()),
+                new BsonDocument("userId", new BsonInt32(100)),
+                "shard0");
+        MongoChunk chunk2 = new MongoChunk(
+                new BsonDocument("userId", new BsonInt32(100)),
+                new BsonDocument("userId", new BsonInt32(500)),
+                "shard1");
+        MongoChunk chunk3 = new MongoChunk(
+                new BsonDocument("userId", new BsonInt32(500)),
+                new BsonDocument("userId", new BsonMaxKey()),
+                "shard0");
+
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadata(new MongoShardedCollectionMetadata(new BsonDocument("userId", new BsonInt32(1)), Optional.empty()))
+                .setChunks(List.of(chunk1, chunk2, chunk3))
+                .setShardAddresses(ImmutableMap.of(
+                        "shard0", List.of(shard0Address),
+                        "shard1", List.of(shard1Address)))
+                .setEstimatedDocumentCount(10_000);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(defaultAddress), mongoSession);
 
         ConnectorSession session = TestingConnectorSession.builder()
                 .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
@@ -318,10 +339,435 @@ public class TestMongoSplitManager
                 Constraint.alwaysTrue());
 
         List<ConnectorSplit> splits = splitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
+        assertThat(splits).hasSize(3);
+
+        // Split 0: [MinKey, 100) on shard0
+        MongoSplit split0 = (MongoSplit) splits.get(0);
+        assertThat(split0.getAddresses()).containsExactly(shard0Address);
+        assertThat(split0.getPartitionBounds()).isPresent();
+        MongoPartitionBounds bounds0 = split0.getPartitionBounds().get();
+        assertThat(bounds0.keyNames()).containsExactly("userId");
+        assertThat(bounds0.lowerInclusive()).isTrue();
+        assertThat(bounds0.upperInclusive()).isFalse();
+        assertThat(bounds0.parseLowerBoundDocument()).contains(new BsonDocument("userId", new BsonMinKey()));
+        assertThat(bounds0.parseUpperBoundDocument()).contains(new BsonDocument("userId", new BsonInt32(100)));
+
+        // Split 1: [100, 500) on shard1
+        MongoSplit split1 = (MongoSplit) splits.get(1);
+        assertThat(split1.getAddresses()).containsExactly(shard1Address);
+        assertThat(split1.getPartitionBounds()).isPresent();
+        MongoPartitionBounds bounds1 = split1.getPartitionBounds().get();
+        assertThat(bounds1.keyNames()).containsExactly("userId");
+        assertThat(bounds1.lowerInclusive()).isTrue();
+        assertThat(bounds1.upperInclusive()).isFalse();
+        assertThat(bounds1.parseLowerBoundDocument()).contains(new BsonDocument("userId", new BsonInt32(100)));
+        assertThat(bounds1.parseUpperBoundDocument()).contains(new BsonDocument("userId", new BsonInt32(500)));
+
+        // Split 2: [500, MaxKey) on shard0
+        MongoSplit split2 = (MongoSplit) splits.get(2);
+        assertThat(split2.getAddresses()).containsExactly(shard0Address);
+        assertThat(split2.getPartitionBounds()).isPresent();
+        MongoPartitionBounds bounds2 = split2.getPartitionBounds().get();
+        assertThat(bounds2.keyNames()).containsExactly("userId");
+        assertThat(bounds2.lowerInclusive()).isTrue();
+        assertThat(bounds2.upperInclusive()).isFalse();
+        assertThat(bounds2.parseLowerBoundDocument()).contains(new BsonDocument("userId", new BsonInt32(500)));
+        assertThat(bounds2.parseUpperBoundDocument()).contains(new BsonDocument("userId", new BsonMaxKey()));
+
+        assertThat(splitSource.isFinished()).isTrue();
+    }
+
+    @Test
+    public void testChunkSplitsCompoundKey()
+            throws Exception
+    {
+        HostAddress defaultAddress = HostAddress.fromParts("127.0.0.1", 27017);
+        HostAddress shard0Address = HostAddress.fromParts("shard0-host", 27017);
+        HostAddress shard1Address = HostAddress.fromParts("shard1-host", 27017);
+
+        BsonDocument compoundShardKey = new BsonDocument()
+                .append("region", new BsonInt32(1))
+                .append("userId", new BsonInt32(1));
+
+        MongoChunk chunk1 = new MongoChunk(
+                new BsonDocument().append("region", new BsonMinKey()).append("userId", new BsonMinKey()),
+                new BsonDocument().append("region", new BsonString("US")).append("userId", new BsonInt32(1000)),
+                "shard0");
+        MongoChunk chunk2 = new MongoChunk(
+                new BsonDocument().append("region", new BsonString("US")).append("userId", new BsonInt32(1000)),
+                new BsonDocument().append("region", new BsonMaxKey()).append("userId", new BsonMaxKey()),
+                "shard1");
+
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadata(new MongoShardedCollectionMetadata(compoundShardKey, Optional.empty()))
+                .setChunks(List.of(chunk1, chunk2))
+                .setShardAddresses(ImmutableMap.of(
+                        "shard0", List.of(shard0Address),
+                        "shard1", List.of(shard1Address)))
+                .setEstimatedDocumentCount(10_000);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(defaultAddress), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "CHUNK"))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        ConnectorSplitSource splitSource = splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue());
+
+        List<ConnectorSplit> splits = splitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
+        assertThat(splits).hasSize(2);
+
+        MongoSplit split0 = (MongoSplit) splits.get(0);
+        assertThat(split0.getAddresses()).containsExactly(shard0Address);
+        assertThat(split0.getPartitionBounds().get().keyNames()).containsExactly("region", "userId");
+        assertThat(split0.getPartitionBounds().get().lowerInclusive()).isTrue();
+        assertThat(split0.getPartitionBounds().get().upperInclusive()).isFalse();
+
+        MongoSplit split1 = (MongoSplit) splits.get(1);
+        assertThat(split1.getAddresses()).containsExactly(shard1Address);
+        assertThat(split1.getPartitionBounds().get().keyNames()).containsExactly("region", "userId");
+        assertThat(split1.getPartitionBounds().get().lowerInclusive()).isTrue();
+        assertThat(split1.getPartitionBounds().get().upperInclusive()).isFalse();
+    }
+
+    @Test
+    public void testExplicitChunkStrategyFailsWhenNotSharded()
+    {
+        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
+        TestingMongoSession mongoSession = new TestingMongoSession();
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "CHUNK"))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        assertThatThrownBy(() -> splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue()))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("is not sharded")
+                .matches(e -> ((TrinoException) e).getErrorCode().equals(NOT_SUPPORTED.toErrorCode()));
+    }
+
+    @Test
+    public void testExplicitChunkStrategyFailsWhenHashedKey()
+    {
+        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
+        BsonDocument hashedShardKey = new BsonDocument("userId", new BsonString("hashed"));
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadata(new MongoShardedCollectionMetadata(hashedShardKey, Optional.empty()));
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "CHUNK"))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        assertThatThrownBy(() -> splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue()))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("has a hashed shard key which does not support chunk-based split generation")
+                .matches(e -> ((TrinoException) e).getErrorCode().equals(NOT_SUPPORTED.toErrorCode()));
+    }
+
+    @Test
+    public void testExplicitChunkStrategyFailsOnClusterError()
+    {
+        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadataException(new MongoTimeoutException("Timed out accessing config.collections"));
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "CHUNK"))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        assertThatThrownBy(() -> splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue()))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("Failed to communicate with MongoDB during split generation")
+                .matches(e -> ((TrinoException) e).getErrorCode().equals(MONGODB_CLUSTER_ERROR.toErrorCode()));
+    }
+
+    @Test
+    public void testAutomaticStrategyUsesChunksWhenEligible()
+            throws Exception
+    {
+        HostAddress defaultAddress = HostAddress.fromParts("127.0.0.1", 27017);
+        HostAddress shard0Address = HostAddress.fromParts("shard0-host", 27017);
+        HostAddress shard1Address = HostAddress.fromParts("shard1-host", 27017);
+
+        MongoChunk chunk1 = new MongoChunk(
+                new BsonDocument("userId", new BsonMinKey()),
+                new BsonDocument("userId", new BsonInt32(100)),
+                "shard0");
+        MongoChunk chunk2 = new MongoChunk(
+                new BsonDocument("userId", new BsonInt32(100)),
+                new BsonDocument("userId", new BsonMaxKey()),
+                "shard1");
+
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadata(new MongoShardedCollectionMetadata(new BsonDocument("userId", new BsonInt32(1)), Optional.empty()))
+                .setChunks(List.of(chunk1, chunk2))
+                .setShardAddresses(ImmutableMap.of(
+                        "shard0", List.of(shard0Address),
+                        "shard1", List.of(shard1Address)))
+                .setEstimatedDocumentCount(10_000);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(defaultAddress), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "AUTOMATIC"))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        ConnectorSplitSource splitSource = splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue());
+
+        List<ConnectorSplit> splits = splitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
+        assertThat(splits).hasSize(2);
+        assertThat(splits.get(0).getAddresses()).containsExactly(shard0Address);
+        assertThat(splits.get(1).getAddresses()).containsExactly(shard1Address);
+        assertThat(((MongoSplit) splits.get(0)).getPartitionBounds()).isPresent();
+        assertThat(((MongoSplit) splits.get(1)).getPartitionBounds()).isPresent();
+    }
+
+    @Test
+    public void testAutomaticStrategyFallsBackToRangeWhenNotSharded()
+            throws Exception
+    {
+        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
+        List<BsonValue> sampleKeys = List.of(new BsonInt32(100), new BsonInt32(200), new BsonInt32(300), new BsonInt32(400));
+
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setIndexes(List.of(new MongoIndex(List.of(new MongodbIndexKey("indexedField", Optional.of(SortOrder.ASC_NULLS_LAST))))))
+                .setEstimatedDocumentCount(10_000)
+                .setCollectionSize(400 * 1024 * 1024)
+                .setSampleKeys(sampleKeys);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "AUTOMATIC",
+                        SPLIT_SIZE, "100MB",
+                        MIN_RECORDS_PER_SPLIT, 1_000L))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        ConnectorSplitSource splitSource = splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue());
+
+        List<ConnectorSplit> splits = splitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
+        assertThat(splits.size()).isGreaterThan(1);
+        assertThat(mongoSession.isSampleCalled()).isTrue();
+        assertThat(((MongoSplit) splits.get(0)).getPartitionBounds().get().keyNames()).containsExactly("indexedField");
+    }
+
+    @Test
+    public void testAutomaticStrategyFallsBackToRangeWhenHashedKey()
+            throws Exception
+    {
+        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
+        List<BsonValue> sampleKeys = List.of(new BsonInt32(100), new BsonInt32(200), new BsonInt32(300), new BsonInt32(400));
+
+        BsonDocument hashedShardKey = new BsonDocument("userId", new BsonString("hashed"));
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadata(new MongoShardedCollectionMetadata(hashedShardKey, Optional.empty()))
+                .setIndexes(List.of(new MongoIndex(List.of(new MongodbIndexKey("indexedField", Optional.of(SortOrder.ASC_NULLS_LAST))))))
+                .setEstimatedDocumentCount(10_000)
+                .setCollectionSize(400 * 1024 * 1024)
+                .setSampleKeys(sampleKeys);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "AUTOMATIC",
+                        SPLIT_SIZE, "100MB",
+                        MIN_RECORDS_PER_SPLIT, 1_000L))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        ConnectorSplitSource splitSource = splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue());
+
+        List<ConnectorSplit> splits = splitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
+        assertThat(splits.size()).isGreaterThan(1);
+        assertThat(mongoSession.isSampleCalled()).isTrue();
+        assertThat(((MongoSplit) splits.get(0)).getPartitionBounds().get().keyNames()).containsExactly("indexedField");
+    }
+
+    @Test
+    public void testAutomaticStrategyFallsBackToRangeOnPermissionError()
+            throws Exception
+    {
+        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
+        List<BsonValue> sampleKeys = List.of(new BsonInt32(100), new BsonInt32(200), new BsonInt32(300), new BsonInt32(400));
+
+        com.mongodb.MongoCommandException unauthorizedException = new com.mongodb.MongoCommandException(
+                new BsonDocument("ok", new BsonInt32(0)).append("errmsg", new BsonString("not authorized on config to execute command")),
+                new com.mongodb.ServerAddress("localhost", 27017));
+
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadataException(unauthorizedException)
+                .setIndexes(List.of(new MongoIndex(List.of(new MongodbIndexKey("indexedField", Optional.of(SortOrder.ASC_NULLS_LAST))))))
+                .setEstimatedDocumentCount(10_000)
+                .setCollectionSize(400 * 1024 * 1024)
+                .setSampleKeys(sampleKeys);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "AUTOMATIC",
+                        SPLIT_SIZE, "100MB",
+                        MIN_RECORDS_PER_SPLIT, 1_000L))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        ConnectorSplitSource splitSource = splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue());
+
+        List<ConnectorSplit> splits = splitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
+        assertThat(splits.size()).isGreaterThan(1);
+        assertThat(mongoSession.isSampleCalled()).isTrue();
+        assertThat(((MongoSplit) splits.get(0)).getPartitionBounds().get().keyNames()).containsExactly("indexedField");
+    }
+
+    @Test
+    public void testAutomaticStrategyFallsBackToSingleWhenBelowThreshold()
+            throws Exception
+    {
+        HostAddress address = HostAddress.fromParts("127.0.0.1", 27017);
+        MongoChunk chunk1 = new MongoChunk(
+                new BsonDocument("userId", new BsonMinKey()),
+                new BsonDocument("userId", new BsonInt32(100)),
+                "shard01");
+        MongoChunk chunk2 = new MongoChunk(
+                new BsonDocument("userId", new BsonInt32(100)),
+                new BsonDocument("userId", new BsonMaxKey()),
+                "shard01");
+
+        TestingMongoSession mongoSession = new TestingMongoSession()
+                .setShardedMetadata(new MongoShardedCollectionMetadata(new BsonDocument("userId", new BsonInt32(1)), Optional.empty()))
+                .setChunks(List.of(chunk1, chunk2))
+                .setEstimatedDocumentCount(500);
+
+        MongoSplitManager splitManager = new MongoSplitManager(() -> List.of(address), mongoSession);
+
+        ConnectorSession session = TestingConnectorSession.builder()
+                .setPropertyMetadata(new MongoSessionProperties(new MongoClientConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of(
+                        PARALLEL_SPLIT_ENABLED, true,
+                        SPLIT_STRATEGY, "AUTOMATIC",
+                        MIN_RECORDS_PER_SPLIT, 1_000L))
+                .build();
+
+        MongoTableHandle tableHandle = new MongoTableHandle(
+                new SchemaTableName("schema", "table"),
+                new RemoteTableName("schema", "table"),
+                Optional.empty());
+
+        ConnectorSplitSource splitSource = splitManager.getSplits(
+                new MongoTransactionHandle(),
+                session,
+                tableHandle,
+                Set.of(),
+                Constraint.alwaysTrue());
+
+        List<ConnectorSplit> splits = splitSource.getNextBatch(10, DynamicFilterSnapshot.EMPTY).get();
         assertThat(splits).hasSize(1);
         MongoSplit split = (MongoSplit) splits.get(0);
         assertThat(split.getPartitionBounds()).isEmpty();
-        assertThat(mongoSession.isSampleCalled()).isFalse();
     }
 
     @Test
@@ -764,6 +1210,18 @@ public class TestMongoSplitManager
         private RuntimeException sampleException;
         private boolean sampleCalled;
 
+        private Optional<MongoShardedCollectionMetadata> shardedMetadata = Optional.empty();
+        private RuntimeException shardedMetadataException;
+        private boolean shardedMetadataCalled;
+
+        private List<MongoChunk> chunks = ImmutableList.of();
+        private RuntimeException chunksException;
+        private boolean chunksCalled;
+
+        private Map<String, List<HostAddress>> shardAddresses = ImmutableMap.of();
+        private RuntimeException shardAddressesException;
+        private boolean shardAddressesCalled;
+
         public TestingMongoSession()
         {
             super(TESTING_TYPE_MANAGER, () -> null, new MongoClientConfig());
@@ -810,6 +1268,57 @@ public class TestMongoSplitManager
             return sampleCalled;
         }
 
+        public TestingMongoSession setShardedMetadata(MongoShardedCollectionMetadata shardedMetadata)
+        {
+            this.shardedMetadata = Optional.ofNullable(shardedMetadata);
+            return this;
+        }
+
+        public TestingMongoSession setShardedMetadataException(RuntimeException shardedMetadataException)
+        {
+            this.shardedMetadataException = shardedMetadataException;
+            return this;
+        }
+
+        public boolean isShardedMetadataCalled()
+        {
+            return shardedMetadataCalled;
+        }
+
+        public TestingMongoSession setChunks(List<MongoChunk> chunks)
+        {
+            this.chunks = requireNonNull(chunks, "chunks is null");
+            return this;
+        }
+
+        public TestingMongoSession setChunksException(RuntimeException chunksException)
+        {
+            this.chunksException = chunksException;
+            return this;
+        }
+
+        public boolean isChunksCalled()
+        {
+            return chunksCalled;
+        }
+
+        public TestingMongoSession setShardAddresses(Map<String, List<HostAddress>> shardAddresses)
+        {
+            this.shardAddresses = requireNonNull(shardAddresses, "shardAddresses is null");
+            return this;
+        }
+
+        public TestingMongoSession setShardAddressesException(RuntimeException shardAddressesException)
+        {
+            this.shardAddressesException = shardAddressesException;
+            return this;
+        }
+
+        public boolean isShardAddressesCalled()
+        {
+            return shardAddressesCalled;
+        }
+
         @Override
         public boolean isView(RemoteTableName remoteTableName)
         {
@@ -820,6 +1329,36 @@ public class TestMongoSplitManager
         public List<MongoIndex> getIndexes(String schemaName, String tableName)
         {
             return indexes;
+        }
+
+        @Override
+        public Optional<MongoShardedCollectionMetadata> getShardedCollectionMetadata(RemoteTableName remoteTableName)
+        {
+            this.shardedMetadataCalled = true;
+            if (shardedMetadataException != null) {
+                throw shardedMetadataException;
+            }
+            return shardedMetadata;
+        }
+
+        @Override
+        public List<MongoChunk> getChunks(RemoteTableName remoteTableName, MongoShardedCollectionMetadata metadata)
+        {
+            this.chunksCalled = true;
+            if (chunksException != null) {
+                throw chunksException;
+            }
+            return chunks;
+        }
+
+        @Override
+        public Map<String, List<HostAddress>> getShardAddresses()
+        {
+            this.shardAddressesCalled = true;
+            if (shardAddressesException != null) {
+                throw shardAddressesException;
+            }
+            return shardAddresses;
         }
 
         @Override
