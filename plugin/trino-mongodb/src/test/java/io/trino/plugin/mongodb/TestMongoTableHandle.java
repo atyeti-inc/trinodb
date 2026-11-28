@@ -135,4 +135,85 @@ public class TestMongoTableHandle
         assertThat(actual)
                 .isEqualTo(expected);
     }
+
+    @Test
+    public void testRoundTripWithAggregation()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("Schema", "Table");
+        MongoColumnHandle groupCol = new MongoColumnHandle("region", ImmutableList.of(), VARCHAR, false, false, Optional.empty());
+        MongoColumnHandle countCol = new MongoColumnHandle("cnt", ImmutableList.of(), INTEGER, false, false, Optional.empty());
+        MongoAccumulator accumulator = new MongoAccumulator(countCol, "count", ImmutableList.of(), false);
+        MongoAggregation aggregation = MongoAggregation.singleGroupingSet(ImmutableList.of(groupCol), ImmutableList.of(accumulator));
+
+        MongoTableHandle expected = new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                Optional.empty(),
+                TupleDomain.all(),
+                ImmutableSet.of(groupCol, countCol),
+                OptionalInt.empty(),
+                Optional.of(aggregation));
+
+        String json = codec.toJson(expected);
+        MongoTableHandle actual = codec.fromJson(json);
+
+        assertThat(actual).isEqualTo(expected);
+        assertThat(actual.hashCode()).isEqualTo(expected.hashCode());
+        assertThat(actual.aggregation()).isEqualTo(Optional.of(aggregation));
+    }
+
+    @Test
+    public void testToStringWithAggregation()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoColumnHandle groupCol = new MongoColumnHandle("region", ImmutableList.of(), VARCHAR, false, false, Optional.empty());
+        MongoColumnHandle countCol = new MongoColumnHandle("cnt", ImmutableList.of(), INTEGER, false, false, Optional.empty());
+        MongoAccumulator accumulator = new MongoAccumulator(countCol, "count", ImmutableList.of(), false);
+        MongoAggregation aggregation = MongoAggregation.singleGroupingSet(ImmutableList.of(groupCol), ImmutableList.of(accumulator));
+
+        MongoTableHandle handle = new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                Optional.empty(),
+                TupleDomain.all(),
+                ImmutableSet.of(),
+                OptionalInt.empty(),
+                Optional.of(aggregation));
+
+        assertThat(handle.toString())
+                .isEqualTo("schema.table aggregation=groupingSets=[[region]] accumulators=[cnt := count(*)]");
+    }
+
+    @Test
+    public void testWithersRetainAggregation()
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("schema", "table");
+        RemoteTableName remoteTableName = new RemoteTableName("schema", "table");
+        MongoColumnHandle groupCol = new MongoColumnHandle("region", ImmutableList.of(), VARCHAR, false, false, Optional.empty());
+        MongoColumnHandle countCol = new MongoColumnHandle("cnt", ImmutableList.of(), INTEGER, false, false, Optional.empty());
+        MongoAccumulator accumulator = new MongoAccumulator(countCol, "count", ImmutableList.of(), false);
+        MongoAggregation aggregation = MongoAggregation.singleGroupingSet(ImmutableList.of(groupCol), ImmutableList.of(accumulator));
+
+        MongoTableHandle baseHandle = new MongoTableHandle(
+                schemaTableName,
+                remoteTableName,
+                Optional.empty());
+
+        MongoTableHandle aggregatedHandle = baseHandle.withAggregation(aggregation);
+        assertThat(aggregatedHandle.aggregation()).contains(aggregation);
+
+        MongoTableHandle withLimit = aggregatedHandle.withLimit(OptionalInt.of(100));
+        assertThat(withLimit.aggregation()).contains(aggregation);
+        assertThat(withLimit.limit()).hasValue(100);
+
+        MongoTableHandle withColumns = withLimit.withProjectedColumns(ImmutableSet.of(groupCol));
+        assertThat(withColumns.aggregation()).contains(aggregation);
+        assertThat(withColumns.projectedColumns()).containsExactly(groupCol);
+
+        MongoTableHandle withConstraint = withColumns.withConstraint(TupleDomain.none());
+        assertThat(withConstraint.aggregation()).contains(aggregation);
+        assertThat(withConstraint.constraint().isNone()).isTrue();
+    }
 }

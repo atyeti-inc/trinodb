@@ -29,6 +29,7 @@ public final class MongoSessionProperties
         implements SessionPropertiesProvider
 {
     private static final String PROJECTION_PUSHDOWN_ENABLED = "projection_pushdown_enabled";
+    public static final String AGGREGATION_PUSHDOWN_ENABLED = "aggregation_pushdown_enabled";
     public static final String DYNAMIC_FILTERING_WAIT_TIMEOUT = "dynamic_filtering_wait_timeout";
 
     private final List<PropertyMetadata<?>> sessionProperties;
@@ -41,6 +42,11 @@ public final class MongoSessionProperties
                         PROJECTION_PUSHDOWN_ENABLED,
                         "Read only required fields from a row type",
                         mongoConfig.isProjectionPushdownEnabled(),
+                        false))
+                .add(booleanProperty(
+                        AGGREGATION_PUSHDOWN_ENABLED,
+                        "Enable aggregation pushdown",
+                        mongoConfig.isAggregationPushdownEnabled(),
                         false))
                 .add(durationProperty(
                         DYNAMIC_FILTERING_WAIT_TIMEOUT,
@@ -59,6 +65,11 @@ public final class MongoSessionProperties
     public static boolean isProjectionPushdownEnabled(ConnectorSession session)
     {
         return session.getProperty(PROJECTION_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
+    public static boolean isAggregationPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(AGGREGATION_PUSHDOWN_ENABLED, Boolean.class);
     }
 
     public static Duration getDynamicFilteringWaitTimeout(ConnectorSession session)

@@ -48,6 +48,7 @@ public class TestMongoClientConfig
                 .setRequiredReplicaSetName(null)
                 .setImplicitRowFieldPrefix("_pos")
                 .setProjectionPushdownEnabled(true)
+                .setAggregationPushdownEnabled(true)
                 .setAllowLocalScheduling(false)
                 .setInsertOrdered(false)
                 .setDynamicFilteringWaitTimeout(new Duration(5, SECONDS)));
@@ -75,6 +76,7 @@ public class TestMongoClientConfig
                 .put("mongodb.required-replica-set", "replica_set")
                 .put("mongodb.implicit-row-field-prefix", "_prefix")
                 .put("mongodb.projection-pushdown-enabled", "false")
+                .put("mongodb.aggregation-pushdown.enabled", "false")
                 .put("mongodb.allow-local-scheduling", "true")
                 .put("mongodb.insert-ordered", "true")
                 .put("mongodb.dynamic-filtering.wait-timeout", "2ms")
@@ -97,6 +99,7 @@ public class TestMongoClientConfig
                 .setRequiredReplicaSetName("replica_set")
                 .setImplicitRowFieldPrefix("_prefix")
                 .setProjectionPushdownEnabled(false)
+                .setAggregationPushdownEnabled(false)
                 .setAllowLocalScheduling(true)
                 .setInsertOrdered(true)
                 .setDynamicFilteringWaitTimeout(new Duration(2, MILLISECONDS));
