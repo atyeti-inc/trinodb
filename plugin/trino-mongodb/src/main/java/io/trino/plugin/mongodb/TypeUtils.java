@@ -59,6 +59,17 @@ public final class TypeUtils
         return type.getBaseName().equals(JSON);
     }
 
+    public static boolean isNumericType(Type type)
+    {
+        return type == BIGINT
+                || type == INTEGER
+                || type == SMALLINT
+                || type == TINYINT
+                || type == REAL
+                || type == DOUBLE
+                || type instanceof DecimalType;
+    }
+
     public static boolean isPushdownSupportedType(Type type)
     {
         return type instanceof CharType

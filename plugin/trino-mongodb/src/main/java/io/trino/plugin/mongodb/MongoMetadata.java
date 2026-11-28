@@ -26,6 +26,8 @@ import io.trino.plugin.base.projection.ApplyProjectionUtil.ProjectedColumnRepres
 import io.trino.plugin.mongodb.MongoIndex.MongodbIndexKey;
 import io.trino.plugin.mongodb.ptf.Query.QueryFunctionHandle;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -88,6 +90,7 @@ import java.util.function.UnaryOperator;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
@@ -104,6 +107,7 @@ import static io.trino.plugin.base.projection.ApplyProjectionUtil.replaceWithNew
 import static io.trino.plugin.mongodb.MongoSession.COLLECTION_NAME;
 import static io.trino.plugin.mongodb.MongoSession.DATABASE_NAME;
 import static io.trino.plugin.mongodb.MongoSession.ID;
+import static io.trino.plugin.mongodb.MongoSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.mongodb.MongoSessionProperties.isProjectionPushdownEnabled;
 import static io.trino.plugin.mongodb.TypeUtils.isPushdownSupportedDomain;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -186,6 +190,13 @@ public class MongoMetadata
     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         requireNonNull(tableHandle, "tableHandle is null");
+        MongoTableHandle table = (MongoTableHandle) tableHandle;
+        if (table.aggregation().isPresent()) {
+            List<ColumnMetadata> columns = table.projectedColumns().stream()
+                    .map(MongoColumnHandle::toColumnMetadata)
+                    .collect(toImmutableList());
+            return new ConnectorTableMetadata(table.schemaTableName(), columns);
+        }
         SchemaTableName tableName = getTableName(tableHandle);
         return getTableMetadata(tableName);
     }
@@ -208,6 +219,14 @@ public class MongoMetadata
     public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
         MongoTableHandle table = (MongoTableHandle) tableHandle;
+        if (table.aggregation().isPresent()) {
+            ImmutableMap.Builder<String, ColumnHandle> columnHandles = ImmutableMap.builder();
+            for (MongoColumnHandle columnHandle : table.projectedColumns()) {
+                columnHandles.put(columnHandle.baseName().toLowerCase(ENGLISH), columnHandle);
+            }
+            return columnHandles.buildOrThrow();
+        }
+
         List<MongoColumnHandle> columns = mongoSession.getTable(table.schemaTableName()).columns();
 
         ImmutableMap.Builder<String, ColumnHandle> columnHandles = ImmutableMap.builder();
@@ -815,6 +834,45 @@ public class MongoMetadata
                 && fields.get(1).getType().equals(VARCHAR)
                 && fields.get(2).getName().orElseThrow().equals(ID);
         // Id type can be of any type
+    }
+
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        if (!isAggregationPushdownEnabled(session)) {
+            return Optional.empty();
+        }
+
+        MongoTableHandle handle = (MongoTableHandle) table;
+        if (handle.aggregation().isPresent() || handle.limit().isPresent() || handle.filter().isPresent()) {
+            return Optional.empty();
+        }
+
+        verify(!groupingSets.isEmpty(), "No grouping sets provided");
+
+        if (groupingSets.size() != 1) {
+            return Optional.empty();
+        }
+
+        ImmutableList.Builder<MongoColumnHandle> groupingColumns = ImmutableList.builder();
+        for (ColumnHandle columnHandle : groupingSets.get(0)) {
+            if (!(columnHandle instanceof MongoColumnHandle mongoColumn) || mongoColumn.hidden()) {
+                return Optional.empty();
+            }
+            groupingColumns.add(mongoColumn);
+        }
+        List<MongoColumnHandle> groupingColumnList = groupingColumns.build();
+
+        if (aggregates.isEmpty() && groupingColumnList.isEmpty()) {
+            return Optional.empty();
+        }
+
+        return MongoAggregationTranslator.translate(handle, aggregates, assignments, groupingColumnList);
     }
 
     @Override

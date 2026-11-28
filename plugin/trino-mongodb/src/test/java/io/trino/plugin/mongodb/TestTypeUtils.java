@@ -16,14 +16,42 @@ package io.trino.plugin.mongodb;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.DecimalType;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.plugin.mongodb.TypeUtils.isNumericType;
 import static io.trino.plugin.mongodb.TypeUtils.isPushdownSupportedDomain;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.RealType.REAL;
+import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTypeUtils
 {
+    @Test
+    public void testIsNumericType()
+    {
+        assertThat(isNumericType(BIGINT)).isTrue();
+        assertThat(isNumericType(INTEGER)).isTrue();
+        assertThat(isNumericType(SMALLINT)).isTrue();
+        assertThat(isNumericType(TINYINT)).isTrue();
+        assertThat(isNumericType(REAL)).isTrue();
+        assertThat(isNumericType(DOUBLE)).isTrue();
+        assertThat(isNumericType(DecimalType.createDecimalType(10, 2))).isTrue();
+        assertThat(isNumericType(DecimalType.createDecimalType(38, 10))).isTrue();
+
+        assertThat(isNumericType(VARCHAR)).isFalse();
+        assertThat(isNumericType(BOOLEAN)).isFalse();
+        assertThat(isNumericType(DATE)).isFalse();
+        assertThat(isNumericType(ObjectIdType.OBJECT_ID)).isFalse();
+    }
+
     @Test
     public void testNaNDomainAfterCompaction()
     {
