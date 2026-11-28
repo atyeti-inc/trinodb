@@ -68,20 +68,23 @@ nodes:
         SUBJECT=$(git log -1 --format="%s" "$commit")
         BODY=$(git log -1 --format="%b" "$commit")
 
-        SUBJECT_LEN=${#SUBJECT}
+        # Strip trailing PR reference annotations appended by GitHub merge/squash (e.g. " (#50)" or " (#50) (#53)")
+        SUBJECT_CLEAN=$(echo "$SUBJECT" | sed -E 's/(\s*\([#!]?[0-9]+\))+$//')
+
+        SUBJECT_LEN=${#SUBJECT_CLEAN}
         if [ "$SUBJECT_LEN" -gt 60 ]; then
           COMMIT_ERRORS+=("Commit $commit subject exceeds 60 characters (actual: $SUBJECT_LEN)")
         fi
 
-        if ! [[ "$SUBJECT" =~ ^[A-Z] ]]; then
-          COMMIT_ERRORS+=("Commit $commit subject must begin with a capital letter (subject: '$SUBJECT')")
+        if ! [[ "$SUBJECT_CLEAN" =~ ^[A-Z] ]]; then
+          COMMIT_ERRORS+=("Commit $commit subject must begin with a capital letter (subject: '$SUBJECT_CLEAN')")
         fi
 
-        if [[ "$SUBJECT" =~ \.$ ]]; then
-          COMMIT_ERRORS+=("Commit $commit subject must not end with a period (subject: '$SUBJECT')")
+        if [[ "$SUBJECT_CLEAN" =~ \.$ ]]; then
+          COMMIT_ERRORS+=("Commit $commit subject must not end with a period (subject: '$SUBJECT_CLEAN')")
         fi
 
-        FIRST_WORD=$(echo "$SUBJECT" | awk '{print $1}' | tr -d ':,')
+        FIRST_WORD=$(echo "$SUBJECT_CLEAN" | awk '{print $1}' | tr -d ':,')
         if [[ "$FIRST_WORD" =~ (Added|Fixed|Updated|Removed|Changed|Implemented|Resolved) ]]; then
           COMMIT_ERRORS+=("Commit $commit uses past-tense verb '$FIRST_WORD'; imperative mood required")
         fi
